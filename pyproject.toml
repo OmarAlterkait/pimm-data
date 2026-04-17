@@ -1,0 +1,23 @@
+[project]
+name = "pimm-data"
+version = "0.1.0"
+description = "Multimodal detector dataset loaders (LArTPC, Water Cherenkov) for particle-imaging ML workflows."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "h5py",
+    "torch",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
