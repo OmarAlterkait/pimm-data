@@ -1,5 +1,6 @@
 """
-JAXTPCCorrReader — reads 3D→2D correspondence from JAXTPC corr files.
+JAXTPCInstReader — reads per-instance sensor decomposition from JAXTPC
+``inst/`` files.
 
 Decodes CSR-encoded per-plane correspondence into flat arrays:
 per pixel entry: (wire, time, group_id, charge).
@@ -18,17 +19,17 @@ import h5py
 log = logging.getLogger(__name__)
 
 
-class JAXTPCCorrReader:
-    """Reads 3D→2D correspondence from JAXTPC corr HDF5 files.
+class JAXTPCInstReader:
+    """Reads per-instance sensor decomposition from JAXTPC ``inst/`` HDF5 files.
 
     Parameters
     ----------
     data_root : str
-        Directory containing corr shard files.
+        Directory containing inst shard files.
     split : str
         Split name.
     dataset_name : str
-        File prefix (e.g., 'sim' matches 'sim_corr_0000.h5').
+        File prefix (e.g., 'sim' matches 'sim_inst_0000.h5').
     planes : str or list
         Which planes to load: 'all' or list like ['volume_0_U'].
     """
@@ -42,7 +43,7 @@ class JAXTPCCorrReader:
 
         self.h5_files = self._find_files()
         assert len(self.h5_files) > 0, (
-            f"No corr files found for '{dataset_name}' in {data_root}/{split}")
+            f"No inst files found for '{dataset_name}' in {data_root}/{split}")
 
         self._initted = False
         self._h5data = []
@@ -50,13 +51,14 @@ class JAXTPCCorrReader:
         self._build_index()
 
     def _find_files(self):
+        """Locate inst shard files."""
         pattern = os.path.join(
             self.data_root, self.split,
-            f'{self.dataset_name}_corr_*.h5')
+            f'{self.dataset_name}_inst_*.h5')
         files = sorted(glob.glob(pattern))
         if not files:
             pattern = os.path.join(
-                self.data_root, f'{self.dataset_name}_corr_*.h5')
+                self.data_root, f'{self.dataset_name}_inst_*.h5')
             files = sorted(glob.glob(pattern))
         return files
 
@@ -77,7 +79,7 @@ class JAXTPCCorrReader:
             self.indices.append(index)
 
         self.cumulative_lengths = np.cumsum(self.cumulative_lengths)
-        log.info("JAXTPCCorrReader: %d events from %d files",
+        log.info("JAXTPCInstReader: %d events from %d files",
                  self.cumulative_lengths[-1], len(self.h5_files))
 
     def h5py_worker_init(self):
@@ -126,13 +128,13 @@ class JAXTPCCorrReader:
         return wires, times, gids, charges
 
     def read_event(self, idx):
-        """Read one event's correspondence data.
+        """Read one event's per-instance sensor decomposition.
 
         Returns dict with:
-            corr.{vol_plane}.wire:     (E,) int32  — wire index per entry
-            corr.{vol_plane}.time:     (E,) int32  — time index per entry
-            corr.{vol_plane}.group_id: (E,) int32  — group ID per entry
-            corr.{vol_plane}.charge:   (E,) float32 — charge per entry
+            inst.{vol_plane}.wire:     (E,) int32  — wire index per entry
+            inst.{vol_plane}.time:     (E,) int32  — time index per entry
+            inst.{vol_plane}.group_id: (E,) int32  — group ID per entry
+            inst.{vol_plane}.charge:   (E,) float32 — charge per entry
             g2t_v{N}:                  (G,) int32  — group_to_track per volume
         """
         if not self._initted:
@@ -166,7 +168,7 @@ class JAXTPCCorrReader:
 
                 wires, times, gids, charges = self._decode_plane_vectorized(pg)
 
-                prefix = f'corr.{plane_label}'
+                prefix = f'inst.{plane_label}'
                 data_dict[f'{prefix}.wire'] = wires
                 data_dict[f'{prefix}.time'] = times
                 data_dict[f'{prefix}.group_id'] = gids

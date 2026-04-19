@@ -1,8 +1,9 @@
 """
-JAXTPCRespReader — reads sparse wire signals from JAXTPC resp files.
+JAXTPCSensorReader — reads sparse raw sensor (wire) signals from JAXTPC
+``sensor/`` files.
 
 Decodes delta-encoded (wire, time, value) triples per plane.
-Output keys are dot-namespaced: plane.{plane_label}.wire/time/value
+Output keys are dot-namespaced: sensor.{plane_label}.wire/time/value
 
 Handles both old format (planes directly under event) and new format
 (planes under volume_N/ subgroups).
@@ -17,17 +18,17 @@ import h5py
 log = logging.getLogger(__name__)
 
 
-class JAXTPCRespReader:
-    """Reads sparse wire signals from JAXTPC resp HDF5 files.
+class JAXTPCSensorReader:
+    """Reads sparse raw sensor signals from JAXTPC ``sensor/`` HDF5 files.
 
     Parameters
     ----------
     data_root : str
-        Directory containing resp shard files.
+        Directory containing sensor shard files.
     split : str
         Split name — used as subdirectory or glob pattern.
     dataset_name : str
-        File prefix (e.g., 'sim' matches 'sim_resp_0000.h5').
+        File prefix (e.g., 'sim' matches 'sim_sensor_0000.h5').
     planes : str or list
         Which planes to load: 'all' or list like ['east_U', 'east_V'].
     decode_digitization : bool
@@ -44,7 +45,7 @@ class JAXTPCRespReader:
 
         self.h5_files = self._find_files()
         assert len(self.h5_files) > 0, (
-            f"No resp files found for '{dataset_name}' in {data_root}/{split}")
+            f"No sensor files found for '{dataset_name}' in {data_root}/{split}")
 
         self._initted = False
         self._h5data = []
@@ -52,13 +53,14 @@ class JAXTPCRespReader:
         self._build_index()
 
     def _find_files(self):
+        """Locate sensor shard files."""
         pattern = os.path.join(
             self.data_root, self.split,
-            f'{self.dataset_name}_resp_*.h5')
+            f'{self.dataset_name}_sensor_*.h5')
         files = sorted(glob.glob(pattern))
         if not files:
             pattern = os.path.join(
-                self.data_root, f'{self.dataset_name}_resp_*.h5')
+                self.data_root, f'{self.dataset_name}_sensor_*.h5')
             files = sorted(glob.glob(pattern))
         return files
 
@@ -79,7 +81,7 @@ class JAXTPCRespReader:
             self.indices.append(index)
 
         self.cumulative_lengths = np.cumsum(self.cumulative_lengths)
-        log.info("JAXTPCRespReader: %d events from %d files",
+        log.info("JAXTPCSensorReader: %d events from %d files",
                  self.cumulative_lengths[-1], len(self.h5_files))
 
     def h5py_worker_init(self):
@@ -138,9 +140,9 @@ class JAXTPCRespReader:
         """Read one event, return dict with plane-namespaced sparse arrays.
 
         Returns keys like:
-            plane.east_U.wire:  (M,) int32
-            plane.east_U.time:  (M,) int32
-            plane.east_U.value: (M,) float32
+            sensor.east_U.wire:  (M,) int32
+            sensor.east_U.time:  (M,) int32
+            sensor.east_U.value: (M,) float32
         """
         if not self._initted:
             self.h5py_worker_init()
@@ -154,7 +156,7 @@ class JAXTPCRespReader:
                 continue
 
             wire, time, values = self._decode_plane(pg)
-            prefix = f'plane.{plane_label}'
+            prefix = f'sensor.{plane_label}'
             data_dict[f'{prefix}.wire'] = wire
             data_dict[f'{prefix}.time'] = time
             data_dict[f'{prefix}.value'] = values

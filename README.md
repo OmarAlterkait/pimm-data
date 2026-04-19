@@ -4,7 +4,7 @@ Multimodal detector dataset loaders for particle-imaging ML workflows.
 
 Reads simulation output produced by:
 
-- **JAXTPC** — Liquid Argon TPC simulation (`seg` / `resp` / `corr` / `labl` HDF5)
+- **JAXTPC** — Liquid Argon TPC simulation (`seg` / `sensor` / `inst` / `labl` HDF5)
 - **LUCiD** — Water Cherenkov / PhotonSim simulation (`seg` / `sensor` HDF5)
 
 Datasets inherit from `torch.utils.data.Dataset` and return flat

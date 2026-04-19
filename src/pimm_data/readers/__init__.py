@@ -6,17 +6,17 @@ returning a flat ``dict[str, np.ndarray]``.
 """
 
 from .jaxtpc_seg import JAXTPCSegReader
-from .jaxtpc_resp import JAXTPCRespReader
+from .jaxtpc_sensor import JAXTPCSensorReader
 from .jaxtpc_labl import JAXTPCLablReader
-from .jaxtpc_corr import JAXTPCCorrReader
+from .jaxtpc_inst import JAXTPCInstReader
 from .lucid_seg import LUCiDSegReader
 from .lucid_sensor import LUCiDSensorReader
 
 __all__ = [
     "JAXTPCSegReader",
-    "JAXTPCRespReader",
+    "JAXTPCSensorReader",
     "JAXTPCLablReader",
-    "JAXTPCCorrReader",
+    "JAXTPCInstReader",
     "LUCiDSegReader",
     "LUCiDSensorReader",
 ]

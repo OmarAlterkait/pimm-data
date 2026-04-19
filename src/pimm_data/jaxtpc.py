@@ -2,13 +2,19 @@
 JAXTPCDataset — multimodal dataset for LArTPC detector simulation output.
 
 Loads from co-indexed HDF5 files produced by JAXTPC's production pipeline:
-seg (3D deposits), resp (2D wire signals), corr (3D->2D correspondence),
-labl (track_id->label lookup tables).
+
+* ``seg/`` — 3D truth deposits
+* ``sensor/`` — raw sparse wire / pixel readout
+* ``inst/`` — per-instance sensor decomposition
+* ``labl/`` — track_id → label lookup tables
+
+Modality strings follow the canonical names in ``docs/DATASET_DESIGN.md``:
+``'seg'``, ``'sensor'``, ``'inst'``, ``'labl'``.
 
 Inherits from :class:`pimm_data.DefaultDataset` so transforms, test_mode
-fragment lists, loop, and max_len work out of the box and the class is
-registered in the :data:`pimm_data.DATASETS` registry for config-driven
-construction (``dict(type="JAXTPCDataset", ...)``).
+fragment lists, loop, and max_len work out of the box; registered in
+:data:`pimm_data.DATASETS` for config-driven construction via
+``dict(type="JAXTPCDataset", ...)``.
 """
 
 import os
@@ -20,9 +26,9 @@ import numpy as np
 from .builder import DATASETS
 from .defaults import DefaultDataset
 from .readers.jaxtpc_seg import JAXTPCSegReader
-from .readers.jaxtpc_resp import JAXTPCRespReader
+from .readers.jaxtpc_sensor import JAXTPCSensorReader
 from .readers.jaxtpc_labl import JAXTPCLablReader
-from .readers.jaxtpc_corr import JAXTPCCorrReader
+from .readers.jaxtpc_inst import JAXTPCInstReader
 
 log = logging.getLogger(__name__)
 
@@ -34,17 +40,20 @@ class JAXTPCDataset(DefaultDataset):
     Parameters
     ----------
     data_root : str
-        Root directory with seg/, resp/, corr/, labl/ subdirectories.
+        Root directory with ``seg/``, ``sensor/``, ``inst/``, ``labl/``
+        subdirectories.
     split : str
         Split name for file discovery.
     modalities : tuple[str]
-        Which to load: 'seg', 'resp', 'labl', 'corr'.
+        Which to load: any subset of ``'seg'``, ``'sensor'``, ``'inst'``,
+        ``'labl'``.
     dataset_name : str
-        File prefix (e.g., 'sim' for 'sim_seg_0000.h5').
+        File prefix (e.g., ``'sim'`` for ``sim_seg_0000.h5``).
     volume : int or None
-        Load only this volume index. None = all volumes.
+        Load only this volume index. ``None`` = all volumes.
     label_key : str
-        Which label to use as 'segment': 'particle', 'cluster', 'interaction'.
+        Which label to use as ``segment``: ``'particle'``, ``'cluster'``,
+        or ``'interaction'``.
     min_deposits : int
         Minimum 3D deposits per event (seg reader filter).
     include_physics : bool
@@ -52,10 +61,11 @@ class JAXTPCDataset(DefaultDataset):
     label_keys : list or None
         Which label datasets to load from labl files.
     transform : list or None
-        Transform pipeline (dict-based configs and/or raw callables).
+        Transform pipeline (dict-based registry configs and/or raw callables).
     test_mode, test_cfg, loop, max_len, ignore_index, cache : standard
         :class:`DefaultDataset` parameters.
     """
+
 
     def __init__(
         self,
@@ -88,9 +98,9 @@ class JAXTPCDataset(DefaultDataset):
         self._source_split = split
 
         self.seg_reader = None
-        self.resp_reader = None
+        self.sensor_reader = None
         self.labl_reader = None
-        self.corr_reader = None
+        self.inst_reader = None
 
         planes = 'all'
         if volume is not None:
@@ -103,9 +113,9 @@ class JAXTPCDataset(DefaultDataset):
                 dataset_name=dataset_name, min_deposits=min_deposits,
                 include_physics=include_physics, volume=volume)
 
-        if 'resp' in self._modalities:
-            self.resp_reader = JAXTPCRespReader(
-                data_root=self._modality_root('resp'), split=split,
+        if 'sensor' in self._modalities:
+            self.sensor_reader = JAXTPCSensorReader(
+                data_root=self._modality_root('sensor'), split=split,
                 dataset_name=dataset_name, planes=planes)
 
         if 'labl' in self._modalities:
@@ -113,26 +123,27 @@ class JAXTPCDataset(DefaultDataset):
                 data_root=self._modality_root('labl'), split=split,
                 dataset_name=dataset_name, label_keys=label_keys)
 
-        if 'corr' in self._modalities:
-            self.corr_reader = JAXTPCCorrReader(
-                data_root=self._modality_root('corr'), split=split,
+        if 'inst' in self._modalities:
+            self.inst_reader = JAXTPCInstReader(
+                data_root=self._modality_root('inst'), split=split,
                 dataset_name=dataset_name, planes=planes)
 
-        active_readers = [r for r in (self.seg_reader, self.resp_reader,
-                                       self.labl_reader, self.corr_reader)
+        active_readers = [r for r in (self.seg_reader, self.sensor_reader,
+                                       self.labl_reader, self.inst_reader)
                           if r is not None]
         if not active_readers:
             raise ValueError(f"Need at least one modality, got {self._modalities}")
-        self._canonical_reader = (self.seg_reader or self.resp_reader
-                                  or self.corr_reader or self.labl_reader)
+        self._canonical_reader = (self.seg_reader or self.sensor_reader
+                                  or self.inst_reader or self.labl_reader)
         self._n_events = min(len(r) for r in active_readers)
 
-        if (self.resp_reader and self.labl_reader
-                and not self.corr_reader and not self.seg_reader):
+        if (self.sensor_reader and self.labl_reader
+                and not self.inst_reader and not self.seg_reader):
             log.warning(
-                "modalities=('resp','labl') without 'corr': labl provides "
-                "track_id->label tables but resp pixels can't be mapped to "
-                "track_ids without corr. No 'segment' will be produced.")
+                "modalities=('sensor','labl') without 'inst' or 'seg': labl "
+                "provides track_id->label tables but sensor hits can't be "
+                "mapped to track_ids without inst (or seg). No 'segment' "
+                "will be produced.")
 
         super().__init__(
             split=split, data_root=data_root,
@@ -141,7 +152,11 @@ class JAXTPCDataset(DefaultDataset):
         )
 
     def _modality_root(self, modality):
-        """Resolve root directory for a modality."""
+        """Resolve root directory for a modality.
+
+        Returns ``data_root/modality`` when it exists, otherwise
+        ``data_root`` itself (single-flat-dir layout).
+        """
         mod_dir = os.path.join(self._source_data_root, modality)
         if os.path.isdir(mod_dir):
             return mod_dir
@@ -156,11 +171,20 @@ class JAXTPCDataset(DefaultDataset):
         return list(range(n))
 
     def get_data(self, idx):
-        """Load one event. Who owns coord depends on modalities:
+        """Load one event. Who owns the bare ``coord`` pointer depends on
+        modalities:
 
-        - seg present: coord = 3D deposits. Resp/corr as namespaced keys.
-        - seg absent, corr+labl present: coord = 2D corr entries with labels.
-        - seg absent, resp present (no corr): coord = 2D resp merged.
+        * ``seg`` present → ``coord`` is 3D deposits (with optional ``segment``
+          if labl is also loaded). Sensor/inst still available namespaced
+          as ``sensor_*`` / ``inst_*`` and raw ``sensor.*`` / ``inst.*``.
+        * ``seg`` absent, ``inst + labl`` present → ``coord`` is the 2D
+          labeled instance point cloud.
+        * ``seg`` absent, ``sensor`` present (no ``inst``) → ``coord`` is
+          the 2D merged sensor hits.
+
+        All namespaced keys always remain in the returned dict; the bare
+        ``coord`` is a convenience pointer for single-modality transform
+        pipelines.
         """
         real_idx = idx % len(self.data_list)
         data_dict = {}
@@ -175,39 +199,40 @@ class JAXTPCDataset(DefaultDataset):
         if self.seg_reader is not None and labl_data:
             self._apply_labl_to_3d(data_dict, labl_data)
 
-        resp_data = {}
-        if self.resp_reader is not None:
-            resp_data = self.resp_reader.read_event(real_idx)
+        sensor_data = {}
+        if self.sensor_reader is not None:
+            sensor_data = self.sensor_reader.read_event(real_idx)
 
-        corr_data = {}
-        if self.corr_reader is not None:
-            corr_data = self.corr_reader.read_event(real_idx)
+        inst_data = {}
+        if self.inst_reader is not None:
+            inst_data = self.inst_reader.read_event(real_idx)
 
         has_seg = self.seg_reader is not None
-        has_resp = bool(resp_data)
-        has_corr = bool(corr_data)
+        has_sensor = bool(sensor_data)
+        has_inst = bool(inst_data)
 
-        if has_resp:
-            self._merge_resp_planes(data_dict, resp_data, prefix='resp_')
-            data_dict.update(resp_data)
+        if has_sensor:
+            self._merge_sensor_planes(data_dict, sensor_data, prefix='sensor_')
+            data_dict.update(sensor_data)
 
-        if has_corr and labl_data:
-            self._build_corr_pointcloud(data_dict, corr_data, labl_data, prefix='corr_')
-        elif has_corr:
-            data_dict.update(corr_data)
+        if has_inst and labl_data:
+            self._build_inst_pointcloud(data_dict, inst_data, labl_data,
+                                        prefix='inst_')
+        elif has_inst:
+            data_dict.update(inst_data)
 
         if has_seg:
             pass
-        elif has_corr and labl_data:
-            data_dict['coord'] = data_dict['corr_coord']
-            data_dict['energy'] = data_dict['corr_energy']
-            data_dict['segment'] = data_dict['corr_segment']
-            data_dict['instance'] = data_dict['corr_instance']
-            data_dict['plane_id'] = data_dict['corr_plane_id']
-        elif has_resp:
-            data_dict['coord'] = data_dict['resp_coord']
-            data_dict['energy'] = data_dict['resp_energy']
-            data_dict['plane_id'] = data_dict['resp_plane_id']
+        elif has_inst and labl_data:
+            data_dict['coord'] = data_dict['inst_coord']
+            data_dict['energy'] = data_dict['inst_energy']
+            data_dict['segment'] = data_dict['inst_segment']
+            data_dict['instance'] = data_dict['inst_instance']
+            data_dict['plane_id'] = data_dict['inst_plane_id']
+        elif has_sensor:
+            data_dict['coord'] = data_dict['sensor_coord']
+            data_dict['energy'] = data_dict['sensor_energy']
+            data_dict['plane_id'] = data_dict['sensor_plane_id']
 
         if labl_data:
             for k, v in labl_data.items():
@@ -260,17 +285,18 @@ class JAXTPCDataset(DefaultDataset):
 
         data_dict['segment'] = labels
 
-    def _merge_resp_planes(self, data_dict, resp_data, prefix=''):
-        """Merge all planes into {prefix}coord (M,2), {prefix}energy (M,1), {prefix}plane_id (M,1)."""
+    def _merge_sensor_planes(self, data_dict, sensor_data, prefix=''):
+        """Merge all sensor planes into ``{prefix}coord (M,2)``,
+        ``{prefix}energy (M,1)``, ``{prefix}plane_id (M,1)``."""
         planes = sorted(set(
-            k.split('.')[1] for k in resp_data if k.endswith('.wire')
+            k.split('.')[1] for k in sensor_data if k.endswith('.wire')
         ))
 
         all_coord, all_energy, all_plane_id = [], [], []
         for i, plane in enumerate(planes):
-            wire = resp_data[f'plane.{plane}.wire']
-            time = resp_data[f'plane.{plane}.time']
-            value = resp_data[f'plane.{plane}.value']
+            wire = sensor_data[f'sensor.{plane}.wire']
+            time = sensor_data[f'sensor.{plane}.time']
+            value = sensor_data[f'sensor.{plane}.value']
             n = len(wire)
             all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
             all_energy.append(value[:, None].astype(np.float32))
@@ -280,28 +306,28 @@ class JAXTPCDataset(DefaultDataset):
         data_dict[f'{prefix}energy'] = np.concatenate(all_energy, axis=0)
         data_dict[f'{prefix}plane_id'] = np.concatenate(all_plane_id, axis=0)
 
-    def _build_corr_pointcloud(self, data_dict, corr_data, labl_data, prefix=''):
-        """Build 2D labeled point cloud from corr + labl.
+    def _build_inst_pointcloud(self, data_dict, inst_data, labl_data, prefix=''):
+        """Build 2D labeled point cloud from inst + labl.
 
-        Each corr entry is a point: coord=(wire,time), feature=charge,
+        Each inst entry is a point: coord=(wire,time), feature=charge,
         instance=group_id, segment from g2t+labl chain.
         Overlapping instances at the same pixel are separate points.
         """
         planes = sorted(set(
-            k.split('.')[1] for k in corr_data if k.endswith('.wire')
+            k.split('.')[1] for k in inst_data if k.endswith('.wire')
         ))
 
         all_coord, all_charge, all_gid, all_segment, all_plane_id = [], [], [], [], []
 
         for pi, plane in enumerate(planes):
-            wire_key = f'corr.{plane}.wire'
-            if wire_key not in corr_data:
+            wire_key = f'inst.{plane}.wire'
+            if wire_key not in inst_data:
                 continue
 
-            wire = corr_data[f'corr.{plane}.wire']
-            time = corr_data[f'corr.{plane}.time']
-            gid = corr_data[f'corr.{plane}.group_id']
-            charge = corr_data[f'corr.{plane}.charge']
+            wire = inst_data[f'inst.{plane}.wire']
+            time = inst_data[f'inst.{plane}.time']
+            gid = inst_data[f'inst.{plane}.group_id']
+            charge = inst_data[f'inst.{plane}.charge']
             n = len(wire)
 
             all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
@@ -310,7 +336,7 @@ class JAXTPCDataset(DefaultDataset):
             all_plane_id.append(np.full((n, 1), pi, dtype=np.int32))
 
             vol_idx = plane.split('_')[1]
-            g2t = corr_data.get(f'g2t_v{vol_idx}')
+            g2t = inst_data.get(f'g2t_v{vol_idx}')
 
             labels = np.full(n, -1, dtype=np.int32)
             if g2t is not None:
@@ -351,9 +377,9 @@ class JAXTPCDataset(DefaultDataset):
         return f"{fname}_evt{event_num:03d}"
 
     def prepare_test_data(self, idx):
-        """Test-time data prep. More lenient than DefaultDataset: ``segment``
-        is only copied into result_dict when present (unlabeled modes
-        e.g. resp-only don't produce a segment key).
+        """Test-time data prep. More lenient than DefaultDataset:
+        ``segment`` is only copied into result_dict when present
+        (unlabeled modes e.g. sensor-only don't produce a segment key).
         """
         data_dict = self.get_data(idx)
         data_dict = self.transform(data_dict)
@@ -384,7 +410,8 @@ class JAXTPCDataset(DefaultDataset):
         return result_dict
 
     def __del__(self):
-        for attr in ('seg_reader', 'resp_reader', 'labl_reader', 'corr_reader'):
+        for attr in ('seg_reader', 'sensor_reader', 'labl_reader',
+                     'inst_reader'):
             reader = getattr(self, attr, None)
             if reader is not None:
                 try:

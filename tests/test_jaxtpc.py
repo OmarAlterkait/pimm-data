@@ -34,9 +34,9 @@ def test_seg_labl(jaxtpc_data_root):
     assert d['segment'].shape[0] == d['coord'].shape[0]
 
 
-def test_resp_only(jaxtpc_data_root):
-    """resp only — all planes merged into 2D point cloud, no labels."""
-    ds = make_ds(jaxtpc_data_root, modalities=('resp',))
+def test_sensor_only(jaxtpc_data_root):
+    """sensor only — all planes merged into 2D point cloud, no labels."""
+    ds = make_ds(jaxtpc_data_root, modalities=('sensor',))
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 2
     assert 'plane_id' in d
@@ -44,52 +44,52 @@ def test_resp_only(jaxtpc_data_root):
     assert len(np.unique(d['plane_id'])) > 1
 
 
-def test_resp_corr_labl(jaxtpc_data_root):
-    """resp + corr + labl — 2D labeled point cloud from corr chain."""
+def test_sensor_inst_labl(jaxtpc_data_root):
+    """sensor + inst + labl — 2D labeled point cloud from inst chain."""
     ds = make_ds(jaxtpc_data_root,
-                 modalities=('resp', 'corr', 'labl'),
+                 modalities=('sensor', 'inst', 'labl'),
                  label_key='particle')
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 2
     assert 'segment' in d
     assert 'instance' in d
     assert 'plane_id' in d
-    resp_keys = [k for k in d if k.startswith('plane.')]
-    assert len(resp_keys) > 0
+    sensor_keys = [k for k in d if k.startswith('sensor.')]
+    assert len(sensor_keys) > 0
     _, counts = np.unique(d['coord'], axis=0, return_counts=True)
     assert np.sum(counts > 1) > 0, "expected overlapping pixels"
 
 
-def test_seg_resp_corr_labl(jaxtpc_data_root):
-    """All modalities — seg owns coord, resp/corr as separate point clouds."""
+def test_seg_sensor_inst_labl(jaxtpc_data_root):
+    """All modalities — seg owns bare coord; sensor/inst as parallel clouds."""
     ds = make_ds(jaxtpc_data_root,
-                 modalities=('seg', 'resp', 'corr', 'labl'),
+                 modalities=('seg', 'sensor', 'inst', 'labl'),
                  label_key='particle')
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 3
     assert 'segment' in d
-    assert 'resp_coord' in d and d['resp_coord'].shape[1] == 2
-    assert 'corr_coord' in d
-    assert 'corr_segment' in d
-    assert 'corr_instance' in d
-    plane_keys = [k for k in d if k.startswith('plane.')]
+    assert 'sensor_coord' in d and d['sensor_coord'].shape[1] == 2
+    assert 'inst_coord' in d
+    assert 'inst_segment' in d
+    assert 'inst_instance' in d
+    plane_keys = [k for k in d if k.startswith('sensor.')]
     assert len(plane_keys) > 0
 
 
-def test_resp_corr_no_labl(jaxtpc_data_root):
-    """resp + corr (no labl) — resp merged, corr namespaced."""
-    ds = make_ds(jaxtpc_data_root, modalities=('resp', 'corr'))
+def test_sensor_inst_no_labl(jaxtpc_data_root):
+    """sensor + inst (no labl) — sensor merged, inst namespaced only."""
+    ds = make_ds(jaxtpc_data_root, modalities=('sensor', 'inst'))
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 2
     assert 'segment' not in d
-    corr_keys = [k for k in d if k.startswith('corr.')]
-    assert len(corr_keys) > 0
+    inst_keys = [k for k in d if k.startswith('inst.')]
+    assert len(inst_keys) > 0
 
 
 def test_volume_filter(jaxtpc_data_root):
     """volume=0 — only volume 0 data (fewer points than all volumes)."""
-    ds_all = make_ds(jaxtpc_data_root, modalities=('resp',))
-    ds_v0 = make_ds(jaxtpc_data_root, modalities=('resp',), volume=0)
+    ds_all = make_ds(jaxtpc_data_root, modalities=('sensor',))
+    ds_v0 = make_ds(jaxtpc_data_root, modalities=('sensor',), volume=0)
     d_all = ds_all.get_data(0)
     d_v0 = ds_v0.get_data(0)
     assert d_v0['coord'].shape[0] < d_all['coord'].shape[0]
