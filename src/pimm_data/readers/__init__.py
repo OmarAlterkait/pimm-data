@@ -1,0 +1,22 @@
+"""Readers for detector HDF5 files.
+
+Each reader is self-contained: given a data_root and split, it discovers
+shard files, builds an event index, and exposes ``read_event(idx)``
+returning a flat ``dict[str, np.ndarray]``.
+"""
+
+from .jaxtpc_seg import JAXTPCSegReader
+from .jaxtpc_resp import JAXTPCRespReader
+from .jaxtpc_labl import JAXTPCLablReader
+from .jaxtpc_corr import JAXTPCCorrReader
+from .lucid_seg import LUCiDSegReader
+from .lucid_sensor import LUCiDSensorReader
+
+__all__ = [
+    "JAXTPCSegReader",
+    "JAXTPCRespReader",
+    "JAXTPCLablReader",
+    "JAXTPCCorrReader",
+    "LUCiDSegReader",
+    "LUCiDSensorReader",
+]
