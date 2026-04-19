@@ -17,23 +17,9 @@ from collections.abc import Sequence
 
 from .builder import DATASETS, build_dataset
 from .transform import Compose, TRANSFORMS
+from .utils.cache import shared_dict
 
 log = logging.getLogger(__name__)
-
-
-def _shared_dict_fallback(name):
-    """Stub cache helper. pimm ships a multiprocessing shared-memory cache
-    via ``pimm.utils.cache.shared_dict``; pimm-data does not. Set
-    ``cache=False`` on DefaultDataset (or replace ``shared_dict`` in this
-    module) to use this feature.
-    """
-    raise RuntimeError(
-        "DefaultDataset cache=True requires a shared_dict implementation; "
-        "pimm-data's default is a stub. Either set cache=False or inject "
-        "an implementation before loading.")
-
-
-shared_dict = _shared_dict_fallback
 
 
 @DATASETS.register_module()
