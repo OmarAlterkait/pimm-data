@@ -1,15 +1,26 @@
 """
 Detector-specific transforms.
 
-PDGToSemantic: derives semantic labels from PDG codes in seg data when
-no label (labl) file is available. For production training with labels,
-datasets load labels from the labl file directly.
+``PDGToSemantic``: derives semantic labels from per-deposit PDG codes
+in seg data when no labl file is available (fallback path).
+
+``RemapSegment``: maps the values in ``data_dict['segment']`` through a
+user-provided ``{old_value: new_value}`` dict, with a default for
+unmapped values. Typical use: after loading with ``label_key='pdg'``
+(so ``segment`` holds raw PDG codes), remap to a task-specific set of
+class indices before loss. Works for any int-valued segment column
+(pdg, interaction, cluster) — not PDG-specific.
 """
 
 import numpy as np
 
 from .transform import TRANSFORMS
-from .utils.pdg import pdg_to_semantic
+from .utils.pdg import pdg_to_semantic, MOTIF_MAP, PID_MAP
+
+_NAMED_SCHEMES = {
+    'motif_5cls': (MOTIF_MAP, 4),
+    'pid_6cls': (PID_MAP, 5),
+}
 
 
 @TRANSFORMS.register_module()
@@ -75,4 +86,80 @@ class PDGToSemantic:
 
             data_dict['segment_interaction'] = (iids[:, None] != -1).astype(np.int32)
 
+        return data_dict
+
+
+@TRANSFORMS.register_module()
+class RemapSegment:
+    """Remap integer values in a segment-like field through a lookup dict.
+
+    Motivating case: production labl files store raw PDG codes in the
+    ``pdg`` column. A downstream task wants 5-class indices. Configure
+    ``JAXTPCDataset`` with ``label_key='pdg'`` (so ``segment`` contains
+    raw PDG codes per deposit), then add::
+
+        dict(type="RemapSegment", scheme="motif_5cls")
+
+    or with an explicit map::
+
+        dict(type="RemapSegment",
+             mapping={22: 0, 11: 0, 13: 1, 211: 1, 2212: 1},
+             default=2)
+
+    Parameters
+    ----------
+    mapping : dict[int, int], optional
+        Explicit ``{source_value: target_class}`` map. Mutually
+        exclusive with ``scheme``.
+    default : int, optional
+        Class index for values not in ``mapping``. If ``mapping`` is
+        given, default is ``max(mapping.values()) + 1``; if ``scheme``
+        is given, scheme-specific default (4 for motif_5cls, 5 for
+        pid_6cls). Can be overridden explicitly.
+    scheme : str, optional
+        One of ``'motif_5cls'``, ``'pid_6cls'``. Loads the built-in
+        PDG→class map. Overridden by ``mapping`` if both are given.
+    key : str, optional
+        Which data-dict field to remap. Default ``'segment'``.
+    ignore_value : int, optional
+        Source values equal to this are written as-is (bypass default).
+        Default ``-1`` so ignore-index sentinels survive remapping.
+    """
+
+    def __init__(self, mapping=None, default=None, scheme=None,
+                 key='segment', ignore_value=-1):
+        if mapping is None and scheme is None:
+            raise ValueError("RemapSegment needs either `mapping` or `scheme`")
+        if mapping is not None:
+            self._map = {int(k): int(v) for k, v in mapping.items()}
+            self._default = int(default) if default is not None \
+                else max(self._map.values()) + 1
+        else:
+            if scheme not in _NAMED_SCHEMES:
+                raise ValueError(f"Unknown scheme {scheme!r}; "
+                                 f"pick from {list(_NAMED_SCHEMES)} or pass `mapping`")
+            base_map, scheme_default = _NAMED_SCHEMES[scheme]
+            self._map = dict(base_map)
+            self._default = int(default) if default is not None else scheme_default
+        self._key = key
+        self._ignore_value = int(ignore_value)
+
+    def __call__(self, data_dict):
+        seg = data_dict.get(self._key)
+        if seg is None:
+            return data_dict
+
+        seg = np.asarray(seg)
+        orig_shape = seg.shape
+        flat = seg.ravel()
+
+        out = np.full(flat.shape, self._default, dtype=np.int32)
+        # Preserve ignore sentinels
+        ignore_mask = flat == self._ignore_value
+        out[ignore_mask] = self._ignore_value
+        # Apply the map
+        for src, dst in self._map.items():
+            out[(flat == src) & ~ignore_mask] = dst
+
+        data_dict[self._key] = out.reshape(orig_shape)
         return data_dict

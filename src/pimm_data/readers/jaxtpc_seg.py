@@ -169,7 +169,12 @@ class JAXTPCSegReader:
         return self._concat_volumes(vol_arrays)
 
     def _read_volume(self, vg, n, vol_idx):
-        """Read arrays from a volume group."""
+        """Read physics arrays from a volume group.
+
+        Seg carries only deposit-level physics. Instance identifiers
+        (group_ids, segment→group FK) live in inst; per-track metadata
+        (pdg, interaction, ancestor) lives in labl.
+        """
         step = float(vg.attrs['pos_step_mm'])
         origin = np.array([vg.attrs['pos_origin_x'],
                            vg.attrs['pos_origin_y'],
@@ -179,22 +184,13 @@ class JAXTPCSegReader:
             'coord': vg['positions'][:].astype(np.float32) * step + origin,
             'energy': vg['de'][:].astype(np.float32),
             'volume_id': np.full(n, vol_idx, dtype=np.int32),
-            'track_ids': vg['track_ids'][:].astype(np.int32),
-            'group_ids': vg['group_ids'][:].astype(np.int32),
         }
-
-        for key, dtype in [('pdg', np.int32), ('interaction_ids', np.int32),
-                           ('ancestor_track_ids', np.int32)]:
-            if key in vg:
-                d[key] = vg[key][:].astype(dtype)
-            else:
-                d[key] = np.full(n, -1, dtype=dtype)
 
         if self.include_physics:
             for key in ('dx', 'theta', 'phi', 't0_us'):
                 if key in vg:
                     d[key] = vg[key][:].astype(np.float32)
-            for key in ('charge', 'photons', 'qs_fractions'):
+            for key in ('charge', 'photons'):
                 if key in vg:
                     d[key] = vg[key][:].astype(np.float32)
 
@@ -211,22 +207,13 @@ class JAXTPCSegReader:
             'coord': evt['positions'][:].astype(np.float32) * step + origin,
             'energy': evt['de'][:].astype(np.float32),
             'volume_id': np.full(n, vol_idx, dtype=np.int32),
-            'track_ids': evt['track_ids'][:].astype(np.int32),
-            'group_ids': evt['group_ids'][:].astype(np.int32),
         }
-
-        for key, dtype in [('pdg', np.int32), ('interaction_ids', np.int32),
-                           ('ancestor_track_ids', np.int32)]:
-            if key in evt:
-                d[key] = evt[key][:].astype(dtype)
-            else:
-                d[key] = np.full(n, -1, dtype=dtype)
 
         if self.include_physics:
             for key in ('dx', 'theta', 'phi', 't0_us'):
                 if key in evt:
                     d[key] = evt[key][:].astype(np.float32)
-            for key in ('charge', 'photons', 'qs_fractions'):
+            for key in ('charge', 'photons'):
                 if key in evt:
                     d[key] = evt[key][:].astype(np.float32)
 
@@ -242,7 +229,7 @@ class JAXTPCSegReader:
             if k == 'coord':
                 data_dict[k] = combined
             elif k in ('energy', 'dx', 'theta', 'phi', 't0_us',
-                       'charge', 'photons', 'qs_fractions'):
+                       'charge', 'photons'):
                 data_dict[k] = combined[:, None]
             elif k == 'volume_id':
                 data_dict[k] = combined[:, None]
@@ -257,11 +244,6 @@ class JAXTPCSegReader:
             'coord': np.zeros((0, 3), dtype=np.float32),
             'energy': np.zeros((0, 1), dtype=np.float32),
             'volume_id': np.zeros((0, 1), dtype=np.int32),
-            'track_ids': np.zeros((0,), dtype=np.int32),
-            'group_ids': np.zeros((0,), dtype=np.int32),
-            'pdg': np.zeros((0,), dtype=np.int32),
-            'interaction_ids': np.zeros((0,), dtype=np.int32),
-            'ancestor_track_ids': np.zeros((0,), dtype=np.int32),
         }
 
     def __len__(self):

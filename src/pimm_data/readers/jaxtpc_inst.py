@@ -154,9 +154,18 @@ class JAXTPCInstReader:
 
             vol_idx = vol_key.replace('volume_', '')
 
+            # Per-volume (per-deposit and per-group) arrays
             if 'group_to_track' in vol:
-                data_dict[f'g2t_v{vol_idx}'] = vol['group_to_track'][:].astype(np.int32)
+                data_dict[f'group_to_track_v{vol_idx}'] = \
+                    vol['group_to_track'][:].astype(np.int32)
+            if 'segment_to_group' in vol:
+                data_dict[f'segment_to_group_v{vol_idx}'] = \
+                    vol['segment_to_group'][:].astype(np.int32)
+            if 'qs_fractions' in vol:
+                data_dict[f'qs_fractions_v{vol_idx}'] = \
+                    vol['qs_fractions'][:].astype(np.float32)
 
+            # Per-plane CSR-decoded pixel entries
             for plane_key in vol:
                 pg = vol[plane_key]
                 if not isinstance(pg, h5py.Group) or 'group_ids' not in pg:

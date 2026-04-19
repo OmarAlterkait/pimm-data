@@ -52,8 +52,12 @@ class JAXTPCDataset(DefaultDataset):
     volume : int or None
         Load only this volume index. ``None`` = all volumes.
     label_key : str
-        Which label to use as ``segment``: ``'particle'``, ``'cluster'``,
-        or ``'interaction'``.
+        Which labl column to copy into ``segment``. Must match a column
+        present in the labl files (by default: ``'pdg'``, ``'cluster'``,
+        ``'interaction'``, ``'ancestor'``). Raw values from the named
+        column are copied verbatim; use a downstream
+        :class:`RemapSegment` transform to convert to task-specific
+        class indices (e.g. ``'pdg' -> motif_5cls``).
     min_deposits : int
         Minimum 3D deposits per event (seg reader filter).
     include_physics : bool
@@ -74,7 +78,7 @@ class JAXTPCDataset(DefaultDataset):
         modalities=('seg',),
         dataset_name='sim',
         volume=None,
-        label_key='particle',
+        label_key='pdg',
         min_deposits=0,
         include_physics=True,
         label_keys=None,
@@ -244,46 +248,75 @@ class JAXTPCDataset(DefaultDataset):
         return data_dict
 
     def _apply_labl_to_3d(self, data_dict, labl_data):
-        """Map 3D deposits' track_ids to labels via labl lookup. Vectorized."""
-        track_ids = data_dict.get('track_ids')
-        volume_ids = data_dict.get('volume_id')
-        if track_ids is None:
-            return
+        """Build per-deposit labels for the 3D ``coord`` from labl.
 
-        n = len(track_ids)
-        labels = np.full(n, -1, dtype=np.int32)
+        Seg no longer carries per-deposit track_ids; labl provides them
+        via its ``segment_to_track`` column (row-aligned with seg
+        deposits) plus a per-unique-track dimension table keyed by
+        ``track_ids``. For each volume, this method:
+
+          1. Concatenates per-volume ``segment_to_track`` arrays in the
+             same order seg concatenates its volume deposits.
+          2. Looks up ``track_{label_key}`` per-track via the track_ids
+             primary key (vectorized searchsorted), producing a per-
+             deposit ``segment`` label.
+          3. Sets ``data_dict['instance']`` to the per-deposit track id
+             (useful for instance seg).
+        """
+        volume_ids = data_dict.get('volume_id')
+        if volume_ids is None:
+            return
+        volume_ids = volume_ids.ravel()
+        n_total = len(volume_ids)
 
         vol_indices = sorted(set(
             k.split('_')[1] for k in labl_data
             if k.startswith('labl_v') and k.endswith('_track_ids')
         ))
 
+        # Per-deposit instance id: glue each volume's segment_to_track
+        # into a single (N_total,) array in the order seg concatenated.
+        instance = np.full(n_total, -1, dtype=np.int32)
+        segment = np.full(n_total, -1, dtype=np.int32)
+
+        metadata_col = f'track_{self._label_key}'
+
         for vi in vol_indices:
-            tids_key = f'labl_{vi}_track_ids'
-            label_key = f'labl_{vi}_{self._label_key}'
-            if tids_key not in labl_data or label_key not in labl_data:
+            vol_num = int(vi[1:])
+            vol_mask = volume_ids == vol_num
+            if not vol_mask.any():
                 continue
 
-            vol_tids = labl_data[tids_key]
-            vol_labels = labl_data[label_key]
-            vol_num = int(vi[1:])
+            stt_key = f'labl_{vi}_segment_to_track'
+            tids_key = f'labl_{vi}_track_ids'
+            meta_key = f'labl_{vi}_{metadata_col}'
 
-            if volume_ids is not None:
-                vol_mask = volume_ids.ravel() == vol_num
-            else:
-                vol_mask = np.ones(n, dtype=bool)
+            if stt_key not in labl_data:
+                continue  # volume has no per-deposit FK — skip labeling
 
-            sort_idx = np.argsort(vol_tids)
-            sorted_tids = vol_tids[sort_idx]
-            sorted_labels = vol_labels[sort_idx]
+            per_deposit_tids = labl_data[stt_key].astype(np.int32)
+            n_vol = int(vol_mask.sum())
+            if len(per_deposit_tids) != n_vol:
+                # Defensive: length mismatch between seg and labl
+                continue
 
-            deposit_tids = track_ids[vol_mask]
-            insert_pos = np.searchsorted(sorted_tids, deposit_tids)
-            insert_pos = np.clip(insert_pos, 0, len(sorted_tids) - 1)
-            matched = sorted_tids[insert_pos] == deposit_tids
-            labels[vol_mask] = np.where(matched, sorted_labels[insert_pos], -1)
+            instance[vol_mask] = per_deposit_tids
 
-        data_dict['segment'] = labels
+            if tids_key in labl_data and meta_key in labl_data:
+                vol_tids = labl_data[tids_key]
+                vol_labels = labl_data[meta_key]
+                sort_idx = np.argsort(vol_tids)
+                sorted_tids = vol_tids[sort_idx]
+                sorted_labels = vol_labels[sort_idx]
+
+                insert_pos = np.searchsorted(sorted_tids, per_deposit_tids)
+                insert_pos = np.clip(insert_pos, 0, len(sorted_tids) - 1)
+                matched = sorted_tids[insert_pos] == per_deposit_tids
+                segment[vol_mask] = np.where(
+                    matched, sorted_labels[insert_pos], -1)
+
+        data_dict['instance'] = instance
+        data_dict['segment'] = segment
 
     def _merge_sensor_planes(self, data_dict, sensor_data, prefix=''):
         """Merge all sensor planes into ``{prefix}coord (M,2)``,
@@ -336,7 +369,7 @@ class JAXTPCDataset(DefaultDataset):
             all_plane_id.append(np.full((n, 1), pi, dtype=np.int32))
 
             vol_idx = plane.split('_')[1]
-            g2t = inst_data.get(f'g2t_v{vol_idx}')
+            g2t = inst_data.get(f'group_to_track_v{vol_idx}')
 
             labels = np.full(n, -1, dtype=np.int32)
             if g2t is not None:
@@ -344,7 +377,7 @@ class JAXTPCDataset(DefaultDataset):
                 track_ids = np.where(valid_gid, g2t[gid], -1)
 
                 tids_key = f'labl_v{vol_idx}_track_ids'
-                lbl_key = f'labl_v{vol_idx}_{self._label_key}'
+                lbl_key = f'labl_v{vol_idx}_track_{self._label_key}'
                 if tids_key in labl_data and lbl_key in labl_data:
                     labl_tids = labl_data[tids_key]
                     labl_vals = labl_data[lbl_key]

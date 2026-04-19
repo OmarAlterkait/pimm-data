@@ -27,7 +27,7 @@ def test_seg_only(jaxtpc_data_root):
 def test_seg_labl(jaxtpc_data_root):
     """seg + labl — 3D with labels from lookup."""
     ds = make_ds(jaxtpc_data_root, modalities=('seg', 'labl'),
-                 label_key='particle')
+                 label_key='pdg')
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 3
     assert 'segment' in d
@@ -48,7 +48,7 @@ def test_sensor_inst_labl(jaxtpc_data_root):
     """sensor + inst + labl — 2D labeled point cloud from inst chain."""
     ds = make_ds(jaxtpc_data_root,
                  modalities=('sensor', 'inst', 'labl'),
-                 label_key='particle')
+                 label_key='pdg')
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 2
     assert 'segment' in d
@@ -64,7 +64,7 @@ def test_seg_sensor_inst_labl(jaxtpc_data_root):
     """All modalities — seg owns bare coord; sensor/inst as parallel clouds."""
     ds = make_ds(jaxtpc_data_root,
                  modalities=('seg', 'sensor', 'inst', 'labl'),
-                 label_key='particle')
+                 label_key='pdg')
     d = ds.get_data(0)
     assert d['coord'].shape[1] == 3
     assert 'segment' in d
@@ -95,7 +95,7 @@ def test_volume_filter(jaxtpc_data_root):
     assert d_v0['coord'].shape[0] < d_all['coord'].shape[0]
 
 
-@pytest.mark.parametrize('label_key', ['particle', 'cluster', 'interaction'])
+@pytest.mark.parametrize('label_key', ['pdg', 'cluster', 'interaction'])
 def test_different_label_keys(jaxtpc_data_root, label_key):
     ds = make_ds(jaxtpc_data_root,
                  modalities=('seg', 'labl'), label_key=label_key)
@@ -123,7 +123,7 @@ def test_dataloader_workers(jaxtpc_data_root):
     """Dataset is fork-safe via lazy h5py_worker_init()."""
     import torch
     ds = make_ds(jaxtpc_data_root, modalities=('seg', 'labl'),
-                 label_key='particle', min_deposits=0)
+                 label_key='pdg', min_deposits=0)
     if len(ds) < 2:
         pytest.skip("Need at least 2 events")
     loader = torch.utils.data.DataLoader(
