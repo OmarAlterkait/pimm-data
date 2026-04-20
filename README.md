@@ -26,7 +26,7 @@ from pimm_data import JAXTPCDataset, LUCiDDataset
 ds = JAXTPCDataset(
     data_root="/path/to/jaxtpc_dataset",
     modalities=("seg", "labl"),
-    label_key="particle",
+    label_key="pdg",          # or "cluster" / "interaction" / "ancestor"
 )
 sample = ds[0]               # nested dict
 print(sample['seg'].keys())  # coord, energy, segment, instance, ...
@@ -85,31 +85,147 @@ construction time:
 
 ## Output schema
 
+A sample is a **nested dict**. Top level has one key per active
+modality, plus `name` and `split`. Each modality's sub-dict is **flat**
+— every listed key is a direct sibling, nothing is nested further.
+
+> Naming collision, up front: `seg` the *modality* (a point cloud of 3D
+> particle-track segments) is different from `segment` the *column*
+> (pimm's convention for a per-point semantic class label). `segment`
+> is a `(N,)` array that sits alongside `coord`, `energy`, and the rest
+> — it's not a sub-dict.
+
+LUCiD and JAXTPC have genuinely different columns per modality, so each
+is documented separately.
+
+### LUCiD sub-dicts
+
 ```python
-sample = {
-    'seg':    {'coord': (N,3), 'energy': (N,1), 'time': ...,
-               'track_idx': (N,), 'instance': (N,), 'segment': (N,),
-               ...},                            # only if 'seg' in modalities
-    'sensor': {'coord': (H,d), 'energy': (H,1), 'time': ...,
-               'sensor_idx': (H,)},             # only if 'sensor' in modalities
-    'inst':   {'coord': (E,d), 'energy': (E,1), 'time': ...,
-               'sensor_idx': (E,), 'particle_idx': (E,),
-               'instance': (E,), 'segment': (E,)},  # only if 'inst' in modalities
-    'labl':   {'event':    {'t0': (), 'overall_containment': (), ...},
-               'particle': {'category': (P,), 'ancestor_particle_idx': (P,), ...},
-               'track':    {'track_id': (T,), 'pdg': (T,),
-                            'ancestor_particle_idx': (T,), ...}},  # LUCiD
-                                                # JAXTPC labl is keyed by volume:
-                                                # {'v0': {...}, 'v1': {...}, ...}
-    'name':  str,
-    'split': str,
+data['seg'] = {
+    'coord':        (N, 3),    # midpoint of Geant4 step
+    'energy':       (N, 1),    # edep
+    'time':         (N, 1),
+    'track_idx':    (N,),      # FK → labl.track
+    # include_physics=True (default):
+    'direction':    (N, 3),
+    'beta_start':   (N, 1),
+    'n_cherenkov':  (N, 1),
+    # present only when 'labl' is also in modalities:
+    'particle_idx': (N,),      # = labl.track.particle_idx[track_idx]
+    'instance':     (N,),      # = particle_idx
+    'segment':      (N,),      # = labl.particle.category[particle_idx]
+}
+
+data['sensor'] = {
+    'coord':       (H, 3),     # PMT xyz, indexed via sensor_positions[sensor_idx]
+    'energy':      (H, 1),     # post-smearing PE
+    'time':        (H, 1),
+    'sensor_idx':  (H,),
+}
+
+data['inst'] = {
+    'coord':        (E, 3),    # same PMT geometry as sensor
+    'energy':       (E, 1),    # per-particle PE (pre-smearing)
+    'time':         (E, 1),
+    'sensor_idx':   (E,),
+    'particle_idx': (E,),      # FK → labl.particle
+    'instance':     (E,),      # = particle_idx
+    # present only when 'labl' is also in modalities:
+    'segment':      (E,),      # = labl.particle.category[particle_idx]
+}
+
+data['labl'] = {
+    'event':    {'t0': (), 'overall_containment': ()},
+    'particle': {'category':              (P,),
+                 'containment':           (P,),
+                 'ancestor_particle_idx': (P,),
+                 'genealogy_data':        (G,),
+                 'genealogy_offsets':     (P+1,),
+                 'ext_genealogy_data':    (...,),
+                 'ext_genealogy_offsets': (P+1,)},
+    'track':    {'track_id':              (T,),
+                 'pdg':                   (T,),
+                 'parent_id':             (T,),
+                 'particle_idx':          (T,),  # FK → labl.particle
+                 'ancestor':              (T,),  # root ancestor track_id
+                 'ancestor_particle_idx': (T,),
+                 'interaction':           (T,),
+                 'initial_energy':        (T,),
+                 'n_cherenkov':           (T,)},
 }
 ```
 
-`segment` and `instance` are attached to `inst` and `seg` only when
-`labl` is also in `modalities`. By default, `instance = particle_idx`
-(LUCiD) or `group_id` (JAXTPC), and `segment` is the per-particle /
-per-track label from `labl`.
+### JAXTPC sub-dicts
+
+JAXTPC is 2D (wire × time) and volume-partitioned. `sensor` and `inst`
+are point clouds merged across planes, with per-plane raw arrays kept
+in a nested `raw` dict for transforms that need them.
+
+```python
+data['seg'] = {
+    'coord':     (N, 3),
+    'energy':    (N, 1),
+    'volume_id': (N, 1),       # which TPC volume each deposit came from
+    # include_physics=True (default):
+    'dx': (N, 1), 'theta': (N, 1), 'phi': (N, 1),
+    'charge': (N, 1), 'photons': (N, 1), 't0_us': (N, 1),
+    # present only when 'labl' is also in modalities:
+    'instance': (N,),          # = segment_to_track (raw Geant4 track_id)
+    'segment':  (N,),          # = track_{label_key} (e.g. track_pdg)
+}
+
+data['sensor'] = {
+    'coord':    (M, 2),        # (wire, time) merged across planes
+    'energy':   (M, 1),
+    'plane_id': (M, 1),
+    'planes':   [str, ...],    # plane labels in plane_id order
+    'raw': {plane_label: {'wire': ..., 'time': ..., 'value': ...}},
+}
+
+data['inst'] = {
+    'coord':    (E, 2),
+    'energy':   (E, 1),
+    'plane_id': (E, 1),
+    'planes':   [str, ...],
+    'raw': {plane_label: {'wire': ..., 'time': ..., 'group_id': ...,
+                          'charge': ...}},
+    'instance': (E,),          # = group_id
+    # present only when 'labl' is also in modalities:
+    'segment':  (E,),          # = track_{label_key}, joined via group_to_track
+}
+
+data['labl'] = {              # keyed by volume
+    'v0': {'track_ids':        (T0,),  # unique track_ids in this volume
+           'track_pdg':        (T0,),
+           'track_cluster':    (T0,),
+           'track_interaction':(T0,),
+           'track_ancestor':   (T0,),
+           'segment_to_track': (N_v0,)},  # seg deposit → track_id (row-aligned)
+    'v1': {...},
+}
+
+data['bridges'] = {           # only when 'inst' is loaded
+    'group_to_track_v0':   (G0,),   # inst group_id → track_id
+    'segment_to_group_v0': (N_v0,), # seg deposit → group_id
+    'qs_fractions_v0':     ...,
+    # ...and _v1, _v2, etc.
+}
+```
+
+**Note on `instance` semantics.** LUCiD puts `instance = particle_idx`
+(one instance per physics particle, coarsening over Geant4 tracks that
+belong to the same particle). JAXTPC puts `instance = track_id` (raw
+Geant4 track IDs) for seg, and `instance = group_id` (inst's native
+grouping key) for inst. If a task needs one convention across both
+datasets, remap in a transform.
+
+**sensor vs inst.** `sensor` is the detector-level response (post
+smearing / noise, when enabled). `inst` is the particle-level
+decomposition (pre-smearing truth). You cannot assume they align
+row-for-row: when smearing is on, `sensor` can carry hits that have
+no counterpart in `inst` — those hits have no particle of origin and
+should be treated as background (e.g. `ignore_index`) by downstream
+training.
 
 ### LUCiD: ancestor-level grouping
 
