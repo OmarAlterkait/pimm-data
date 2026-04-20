@@ -8,7 +8,7 @@ Tests that need data skip gracefully when the dataset is absent.
 import os
 import pytest
 
-_JAXTPC_DEFAULT = '/home/oalterka/desktop_linux/JAXTPC/dataset_1'
+_JAXTPC_DEFAULT = '/home/oalterka/desktop_linux/JAXTPC/dataset_20'
 _LUCID_DEFAULT = '/home/oalterka/desktop_linux/JAXTPC/dataset_wc'
 
 

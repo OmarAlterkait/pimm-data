@@ -1,12 +1,15 @@
-"""Tests for JAXTPCDataset core loading logic (no transforms)."""
+"""Tests for JAXTPCDataset core loading logic (no transforms).
+
+These complement ``test_jaxtpc_task_matrix.py``: where the matrix tests
+cover every DATASET_DESIGN.md row structurally, these test orthogonal
+concerns — volume filtering, label_key variants, DataLoader fork-safety,
+and name/split metadata.
+"""
 
 import numpy as np
 import pytest
 
 from pimm_data import JAXTPCDataset
-
-
-MAX_LEN = 4
 
 
 def make_ds(jaxtpc_data_root, **kwargs):
@@ -15,84 +18,13 @@ def make_ds(jaxtpc_data_root, **kwargs):
     return JAXTPCDataset(**defaults)
 
 
-def test_seg_only(jaxtpc_data_root):
-    """seg only — 3D point cloud, no labels."""
-    ds = make_ds(jaxtpc_data_root, modalities=('seg',))
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 3, f"coord 3D: {d['coord'].shape}"
-    assert d['energy'].shape[1] == 1, f"energy: {d['energy'].shape}"
-    assert 'segment' not in d, "no segment without labl"
-
-
-def test_seg_labl(jaxtpc_data_root):
-    """seg + labl — 3D with labels from lookup."""
-    ds = make_ds(jaxtpc_data_root, modalities=('seg', 'labl'),
-                 label_key='pdg')
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 3
-    assert 'segment' in d
-    assert d['segment'].shape[0] == d['coord'].shape[0]
-
-
-def test_sensor_only(jaxtpc_data_root):
-    """sensor only — all planes merged into 2D point cloud, no labels."""
-    ds = make_ds(jaxtpc_data_root, modalities=('sensor',))
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 2
-    assert 'plane_id' in d
-    assert 'segment' not in d
-    assert len(np.unique(d['plane_id'])) > 1
-
-
-def test_sensor_inst_labl(jaxtpc_data_root):
-    """sensor + inst + labl — 2D labeled point cloud from inst chain."""
-    ds = make_ds(jaxtpc_data_root,
-                 modalities=('sensor', 'inst', 'labl'),
-                 label_key='pdg')
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 2
-    assert 'segment' in d
-    assert 'instance' in d
-    assert 'plane_id' in d
-    sensor_keys = [k for k in d if k.startswith('sensor.')]
-    assert len(sensor_keys) > 0
-    _, counts = np.unique(d['coord'], axis=0, return_counts=True)
-    assert np.sum(counts > 1) > 0, "expected overlapping pixels"
-
-
-def test_seg_sensor_inst_labl(jaxtpc_data_root):
-    """All modalities — seg owns bare coord; sensor/inst as parallel clouds."""
-    ds = make_ds(jaxtpc_data_root,
-                 modalities=('seg', 'sensor', 'inst', 'labl'),
-                 label_key='pdg')
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 3
-    assert 'segment' in d
-    assert 'sensor_coord' in d and d['sensor_coord'].shape[1] == 2
-    assert 'inst_coord' in d
-    assert 'inst_segment' in d
-    assert 'inst_instance' in d
-    plane_keys = [k for k in d if k.startswith('sensor.')]
-    assert len(plane_keys) > 0
-
-
-def test_sensor_inst_no_labl(jaxtpc_data_root):
-    """sensor + inst (no labl) — sensor merged, inst namespaced only."""
-    ds = make_ds(jaxtpc_data_root, modalities=('sensor', 'inst'))
-    d = ds.get_data(0)
-    assert d['coord'].shape[1] == 2
-    assert 'segment' not in d
-    inst_keys = [k for k in d if k.startswith('inst.')]
-    assert len(inst_keys) > 0
-
-
 def test_volume_filter(jaxtpc_data_root):
     """volume=0 — only volume 0 data (fewer points than all volumes)."""
     ds_all = make_ds(jaxtpc_data_root, modalities=('sensor',))
     ds_v0 = make_ds(jaxtpc_data_root, modalities=('sensor',), volume=0)
     d_all = ds_all.get_data(0)
     d_v0 = ds_v0.get_data(0)
-    assert d_v0['coord'].shape[0] < d_all['coord'].shape[0]
+    assert d_v0['sensor']['coord'].shape[0] < d_all['sensor']['coord'].shape[0]
 
 
 @pytest.mark.parametrize('label_key', ['pdg', 'cluster', 'interaction'])
@@ -100,7 +32,7 @@ def test_different_label_keys(jaxtpc_data_root, label_key):
     ds = make_ds(jaxtpc_data_root,
                  modalities=('seg', 'labl'), label_key=label_key)
     d = ds.get_data(0)
-    assert len(np.unique(d['segment'])) > 1
+    assert len(np.unique(d['seg']['segment'])) > 1
 
 
 def test_len_and_getitem(jaxtpc_data_root):
@@ -108,8 +40,7 @@ def test_len_and_getitem(jaxtpc_data_root):
     assert len(ds) > 0
     sample = ds[0]
     assert isinstance(sample, dict)
-    assert 'coord' in sample
-    assert isinstance(sample['coord'], np.ndarray)
+    assert isinstance(sample['seg']['coord'], np.ndarray)
 
 
 def test_name_and_split(jaxtpc_data_root):
@@ -132,7 +63,26 @@ def test_dataloader_workers(jaxtpc_data_root):
     seen = 0
     for batch in loader:
         assert isinstance(batch[0], dict)
+        assert 'seg' in batch[0]
         seen += 1
         if seen >= 2:
             break
     assert seen >= 1
+
+
+def test_physics_fields_present(jaxtpc_data_root):
+    ds = make_ds(jaxtpc_data_root, modalities=('seg',), include_physics=True)
+    d = ds.get_data(0)
+    for key in ('dx', 'theta', 'phi'):
+        if key in d['seg']:  # present iff h5 had the field
+            assert d['seg'][key].shape[1] == 1
+
+
+def test_empty_modalities_raises(jaxtpc_data_root):
+    with pytest.raises(ValueError, match='empty'):
+        make_ds(jaxtpc_data_root, modalities=())
+
+
+def test_unknown_modality_raises(jaxtpc_data_root):
+    with pytest.raises(ValueError, match='Unknown'):
+        make_ds(jaxtpc_data_root, modalities=('seg', 'mystery'))

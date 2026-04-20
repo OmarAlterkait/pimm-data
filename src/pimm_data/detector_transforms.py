@@ -14,13 +14,53 @@ class indices before loss. Works for any int-valued segment column
 
 import numpy as np
 
-from .transform import TRANSFORMS
+from .transform import TRANSFORMS, Compose
 from .utils.pdg import pdg_to_semantic, MOTIF_MAP, PID_MAP
 
 _NAMED_SCHEMES = {
     'motif_5cls': (MOTIF_MAP, 4),
     'pid_6cls': (PID_MAP, 5),
 }
+
+
+@TRANSFORMS.register_module()
+class ApplyToStream:
+    """Dispatch a sub-pipeline to a nested sub-dict keyed by ``stream``.
+
+    :class:`JAXTPCDataset` emits nested dicts of the form
+    ``{'seg': {'coord': ..., 'segment': ...}, 'inst': {...}, ...}``.
+    Wrap transforms that hardcode ``'coord'`` / ``'segment'`` in
+    ``ApplyToStream(stream='seg', transforms=[...])`` so they operate
+    on the sub-dict directly::
+
+        dict(type='ApplyToStream', stream='seg', transforms=[
+            dict(type='GridSample', grid_size=0.5),
+            dict(type='RandomRotate'),
+        ])
+
+    If ``data_dict`` has no ``stream`` key, the transform is a no-op.
+    This lets a single config run through optional streams without
+    branching on modality presence.
+    """
+
+    def __init__(self, stream, transforms=None, required=False):
+        if transforms is None:
+            transforms = []
+        self.stream = stream
+        self.required = bool(required)
+        self.inner = Compose(transforms) if transforms else None
+
+    def __call__(self, data_dict):
+        if self.stream not in data_dict:
+            if self.required:
+                raise KeyError(
+                    f"ApplyToStream(stream={self.stream!r}) applied but "
+                    f"data_dict has no such stream; "
+                    f"available: {sorted(k for k in data_dict if isinstance(data_dict.get(k), dict))}")
+            return data_dict
+        if self.inner is not None:
+            data_dict[self.stream] = self.inner(data_dict[self.stream])
+        return data_dict
 
 
 @TRANSFORMS.register_module()

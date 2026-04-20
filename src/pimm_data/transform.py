@@ -86,28 +86,46 @@ def index_operator(data_dict, index, duplicate=False):
 
 @TRANSFORMS.register_module()
 class Collect(object):
-    def __init__(self, keys, offset_keys_dict=None, **kwargs):
-        """
-        e.g. Collect(keys=[coord], feat_keys=[coord, color])
-        """
+    """Pack a flat batch dict for the model from possibly-nested input.
+
+    ``stream=`` scopes the source to ``data_dict[stream]`` before pulling
+    keys. Use it to extract one stream from a nested
+    ``{'seg': {...}, 'inst': {...}}``-style dict produced by datasets
+    that emit multiple point clouds::
+
+        Collect(stream='seg', keys=['coord', 'segment'],
+                feat_keys=['coord', 'energy'])
+
+    Output keys stay bare (``coord``, ``segment``, ``feat``, …) so
+    collate / Point / model see the same flat shape as before.
+    """
+
+    def __init__(self, keys, offset_keys_dict=None, stream=None, **kwargs):
         if offset_keys_dict is None:
             offset_keys_dict = dict(offset="coord")
         self.keys = keys
         self.offset_keys = offset_keys_dict
+        self.stream = stream
         self.kwargs = kwargs
 
     def __call__(self, data_dict):
+        source = data_dict[self.stream] if self.stream is not None else data_dict
         data = dict()
         if isinstance(self.keys, str):
             self.keys = [self.keys]
         for key in self.keys:
-            data[key] = data_dict[key]
+            data[key] = source[key]
         for key, value in self.offset_keys.items():
-            data[key] = torch.tensor([data_dict[value].shape[0]])
+            data[key] = torch.tensor([source[value].shape[0]])
         for name, keys in self.kwargs.items():
             name = name.replace("_keys", "")
             assert isinstance(keys, Sequence)
-            data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
+            data[name] = torch.cat([source[key].float() for key in keys], dim=1)
+        # Pass through top-level scalars (name/split) that live outside streams
+        if self.stream is not None:
+            for passthrough in ("name", "split"):
+                if passthrough in data_dict and passthrough not in data:
+                    data[passthrough] = data_dict[passthrough]
         return data
 
 

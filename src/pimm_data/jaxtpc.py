@@ -8,13 +8,31 @@ Loads from co-indexed HDF5 files produced by JAXTPC's production pipeline:
 * ``inst/`` — per-instance sensor decomposition
 * ``labl/`` — track_id → label lookup tables
 
-Modality strings follow the canonical names in ``docs/DATASET_DESIGN.md``:
-``'seg'``, ``'sensor'``, ``'inst'``, ``'labl'``.
+Modality strings follow ``docs/DATASET_DESIGN.md``: ``'seg'``, ``'sensor'``,
+``'inst'``, ``'labl'``.
 
-Inherits from :class:`pimm_data.DefaultDataset` so transforms, test_mode
-fragment lists, loop, and max_len work out of the box; registered in
-:data:`pimm_data.DATASETS` for config-driven construction via
-``dict(type="JAXTPCDataset", ...)``.
+Returns a **nested** dict: each loaded modality owns a sub-dict with clean
+unprefixed keys::
+
+    {
+      'seg':    {'coord': (N,3), 'energy': (N,1), 'volume_id': ..., ...},
+      'sensor': {'coord': (M,2), 'energy': (M,1), 'plane_id': ...,
+                 'raw': {plane_label: {'wire', 'time', 'value'}}},
+      'inst':   {'coord': (E,2), 'energy': (E,1), 'instance': ..., ...,
+                 'raw': {plane_label: {'wire', 'time', 'group_id', 'charge'}}},
+      'labl':   {'v0': {'track_ids': (T,), 'track_pdg': (T,),
+                        'segment_to_track': (N_v,), ...}, 'v1': {...}},
+      'bridges':{'group_to_track_v0': (G,), 'segment_to_group_v0': (N_v,),
+                 'qs_fractions_v0': ..., ...},
+      'name': str, 'split': str,
+    }
+
+Missing modalities have no top-level key. There is no bare ``coord`` / no
+precedence / no prefixed aliases — transforms pick a stream explicitly (see
+``ApplyToStream`` and ``Collect(stream=...)``).
+
+Registered in :data:`pimm_data.DATASETS` for config-driven construction
+via ``dict(type="JAXTPCDataset", ...)``.
 """
 
 import os
@@ -35,7 +53,7 @@ log = logging.getLogger(__name__)
 
 @DATASETS.register_module()
 class JAXTPCDataset(DefaultDataset):
-    """LArTPC multimodal dataset.
+    """LArTPC multimodal dataset with nested per-stream output.
 
     Parameters
     ----------
@@ -45,27 +63,27 @@ class JAXTPCDataset(DefaultDataset):
     split : str
         Split name for file discovery.
     modalities : tuple[str]
-        Which to load: any subset of ``'seg'``, ``'sensor'``, ``'inst'``,
-        ``'labl'``.
+        Any subset of ``'seg'``, ``'sensor'``, ``'inst'``, ``'labl'``.
+        ``('labl',)`` and ``('sensor', 'labl')`` are invalid (see
+        ``docs/DATASET_DESIGN.md#invalid-combinations``).
     dataset_name : str
         File prefix (e.g., ``'sim'`` for ``sim_seg_0000.h5``).
     volume : int or None
         Load only this volume index. ``None`` = all volumes.
     label_key : str
-        Which labl column to copy into ``segment``. Must match a column
-        present in the labl files (by default: ``'pdg'``, ``'cluster'``,
-        ``'interaction'``, ``'ancestor'``). Raw values from the named
-        column are copied verbatim; use a downstream
-        :class:`RemapSegment` transform to convert to task-specific
-        class indices (e.g. ``'pdg' -> motif_5cls``).
+        Which labl column to decorate the point clouds with. Must match a
+        column in the labl files (``'pdg'``, ``'cluster'``, ``'interaction'``,
+        ``'ancestor'``). Raw values from ``track_{label_key}`` are broadcast
+        to each deposit / pixel entry; use a downstream ``RemapSegment`` to
+        map raw values to task-specific class indices.
     min_deposits : int
         Minimum 3D deposits per event (seg reader filter).
     include_physics : bool
         Whether seg reader loads dx, theta, phi, charge, photons, etc.
     label_keys : list or None
-        Which label datasets to load from labl files.
+        Which label datasets to load from labl files (None → all).
     transform : list or None
-        Transform pipeline (dict-based registry configs and/or raw callables).
+        Transform pipeline.
     test_mode, test_cfg, loop, max_len, ignore_index, cache : standard
         :class:`DefaultDataset` parameters.
     """
@@ -91,6 +109,8 @@ class JAXTPCDataset(DefaultDataset):
         cache=False,
     ):
         self._modalities = tuple(modalities)
+        self._validate_modalities(self._modalities)
+
         self._dataset_name = dataset_name
         self._volume = volume
         self._label_key = label_key
@@ -135,19 +155,9 @@ class JAXTPCDataset(DefaultDataset):
         active_readers = [r for r in (self.seg_reader, self.sensor_reader,
                                        self.labl_reader, self.inst_reader)
                           if r is not None]
-        if not active_readers:
-            raise ValueError(f"Need at least one modality, got {self._modalities}")
         self._canonical_reader = (self.seg_reader or self.sensor_reader
                                   or self.inst_reader or self.labl_reader)
         self._n_events = min(len(r) for r in active_readers)
-
-        if (self.sensor_reader and self.labl_reader
-                and not self.inst_reader and not self.seg_reader):
-            log.warning(
-                "modalities=('sensor','labl') without 'inst' or 'seg': labl "
-                "provides track_id->label tables but sensor hits can't be "
-                "mapped to track_ids without inst (or seg). No 'segment' "
-                "will be produced.")
 
         super().__init__(
             split=split, data_root=data_root,
@@ -155,19 +165,36 @@ class JAXTPCDataset(DefaultDataset):
             cache=cache, ignore_index=ignore_index, loop=loop,
         )
 
-    def _modality_root(self, modality):
-        """Resolve root directory for a modality.
+    @staticmethod
+    def _validate_modalities(modalities):
+        mods = set(modalities)
+        if not mods:
+            raise ValueError("modalities is empty; must load at least one")
+        unknown = mods - {'seg', 'sensor', 'inst', 'labl'}
+        if unknown:
+            raise ValueError(
+                f"Unknown modalities {unknown}; valid: "
+                "'seg', 'sensor', 'inst', 'labl'")
+        if mods == {'labl'}:
+            raise ValueError(
+                "Invalid modality combination ('labl',): labl is a "
+                "dimension table and requires an instance-bearing modality "
+                "('seg' or 'inst') to join against. "
+                "See docs/DATASET_DESIGN.md#invalid-combinations.")
+        if mods == {'sensor', 'labl'}:
+            raise ValueError(
+                "Invalid modality combination ('sensor', 'labl'): sensor has "
+                "no instance separation, so labl cannot be attached. Add "
+                "'inst' or 'seg' to the modalities tuple. "
+                "See docs/DATASET_DESIGN.md#invalid-combinations.")
 
-        Returns ``data_root/modality`` when it exists, otherwise
-        ``data_root`` itself (single-flat-dir layout).
-        """
+    def _modality_root(self, modality):
         mod_dir = os.path.join(self._source_data_root, modality)
         if os.path.isdir(mod_dir):
             return mod_dir
         return self._source_data_root
 
     def get_data_list(self):
-        """Range of event indices, optionally capped by max_len."""
         n = getattr(self, '_n_events', 0)
         max_len = getattr(self, '_max_len', -1)
         if max_len > 0:
@@ -175,230 +202,242 @@ class JAXTPCDataset(DefaultDataset):
         return list(range(n))
 
     def get_data(self, idx):
-        """Load one event. Who owns the bare ``coord`` pointer depends on
-        modalities:
-
-        * ``seg`` present → ``coord`` is 3D deposits (with optional ``segment``
-          if labl is also loaded). Sensor/inst still available namespaced
-          as ``sensor_*`` / ``inst_*`` and raw ``sensor.*`` / ``inst.*``.
-        * ``seg`` absent, ``inst + labl`` present → ``coord`` is the 2D
-          labeled instance point cloud.
-        * ``seg`` absent, ``sensor`` present (no ``inst``) → ``coord`` is
-          the 2D merged sensor hits.
-
-        All namespaced keys always remain in the returned dict; the bare
-        ``coord`` is a convenience pointer for single-modality transform
-        pipelines.
-        """
+        """Load one event as a nested dict (schema: see module docstring)."""
         real_idx = idx % len(self.data_list)
-        data_dict = {}
+
+        data = {
+            'name': self.get_data_name(real_idx),
+            'split': self.split if isinstance(self.split, str) else 'custom',
+        }
+
+        labl_by_volume = {}
+        if self.labl_reader is not None:
+            labl_by_volume = self._build_labl(self.labl_reader.read_event(real_idx))
+            if self._volume is not None:
+                # Drop labl volumes the user isn't loading (keeps the
+                # dataset's view consistent with ``volume=`` on other readers).
+                keep = f'v{self._volume}'
+                labl_by_volume = {k: v for k, v in labl_by_volume.items()
+                                  if k == keep}
+            if labl_by_volume:
+                data['labl'] = labl_by_volume
+
+        if self.inst_reader is not None:
+            inst_raw = self.inst_reader.read_event(real_idx)
+            data['inst'] = self._build_inst_cloud(inst_raw, labl_by_volume)
+            bridges = self._build_bridges(inst_raw)
+            if bridges:
+                data['bridges'] = bridges
+
+        if self.sensor_reader is not None:
+            data['sensor'] = self._build_sensor_cloud(
+                self.sensor_reader.read_event(real_idx))
 
         if self.seg_reader is not None:
-            data_dict.update(self.seg_reader.read_event(real_idx))
+            data['seg'] = self._build_seg_cloud(
+                self.seg_reader.read_event(real_idx), labl_by_volume)
 
-        labl_data = {}
-        if self.labl_reader is not None:
-            labl_data = self.labl_reader.read_event(real_idx)
+        return data
 
-        if self.seg_reader is not None and labl_data:
-            self._apply_labl_to_3d(data_dict, labl_data)
+    # ------------------------------------------------------------------
+    # Per-modality builders
+    # ------------------------------------------------------------------
 
-        sensor_data = {}
-        if self.sensor_reader is not None:
-            sensor_data = self.sensor_reader.read_event(real_idx)
+    def _build_seg_cloud(self, seg_raw, labl_by_volume):
+        """3D deposit sub-dict; decorates with segment/instance if labl present."""
+        sub = {}
+        for k, v in seg_raw.items():
+            sub[k] = v  # coord, energy, volume_id, physics — readers emit bare
 
-        inst_data = {}
-        if self.inst_reader is not None:
-            inst_data = self.inst_reader.read_event(real_idx)
+        if labl_by_volume and 'volume_id' in sub:
+            segment, instance = self._decorate_seg_from_labl(
+                sub['volume_id'], labl_by_volume)
+            sub['segment'] = segment
+            sub['instance'] = instance
 
-        has_seg = self.seg_reader is not None
-        has_sensor = bool(sensor_data)
-        has_inst = bool(inst_data)
+        return sub
 
-        if has_sensor:
-            self._merge_sensor_planes(data_dict, sensor_data, prefix='sensor_')
-            data_dict.update(sensor_data)
+    def _build_sensor_cloud(self, sensor_raw):
+        """Merge per-plane sensor raw into a 2D point cloud + raw passthrough."""
+        planes, coord, energy, plane_id, raw = self._merge_plane_dotted(
+            sensor_raw, prefix='sensor', value_key='value')
+        return {
+            'coord': coord, 'energy': energy, 'plane_id': plane_id,
+            'planes': planes, 'raw': raw,
+        }
 
-        if has_inst and labl_data:
-            self._build_inst_pointcloud(data_dict, inst_data, labl_data,
-                                        prefix='inst_')
-        elif has_inst:
-            data_dict.update(inst_data)
+    def _build_inst_cloud(self, inst_raw, labl_by_volume):
+        """Merge per-plane inst raw into a 2D point cloud + raw passthrough.
 
-        if has_seg:
-            pass
-        elif has_inst and labl_data:
-            data_dict['coord'] = data_dict['inst_coord']
-            data_dict['energy'] = data_dict['inst_energy']
-            data_dict['segment'] = data_dict['inst_segment']
-            data_dict['instance'] = data_dict['inst_instance']
-            data_dict['plane_id'] = data_dict['inst_plane_id']
-        elif has_sensor:
-            data_dict['coord'] = data_dict['sensor_coord']
-            data_dict['energy'] = data_dict['sensor_energy']
-            data_dict['plane_id'] = data_dict['sensor_plane_id']
-
-        if labl_data:
-            for k, v in labl_data.items():
-                if k not in data_dict:
-                    data_dict[k] = v
-
-        data_dict['name'] = self.get_data_name(real_idx)
-        data_dict['split'] = self.split if isinstance(self.split, str) else 'custom'
-        return data_dict
-
-    def _apply_labl_to_3d(self, data_dict, labl_data):
-        """Build per-deposit labels for the 3D ``coord`` from labl.
-
-        Seg no longer carries per-deposit track_ids; labl provides them
-        via its ``segment_to_track`` column (row-aligned with seg
-        deposits) plus a per-unique-track dimension table keyed by
-        ``track_ids``. For each volume, this method:
-
-          1. Concatenates per-volume ``segment_to_track`` arrays in the
-             same order seg concatenates its volume deposits.
-          2. Looks up ``track_{label_key}`` per-track via the track_ids
-             primary key (vectorized searchsorted), producing a per-
-             deposit ``segment`` label.
-          3. Sets ``data_dict['instance']`` to the per-deposit track id
-             (useful for instance seg).
+        Attaches ``segment`` when labl available (via group_to_track chain).
+        ``instance`` is always attached (== group_id).
         """
-        volume_ids = data_dict.get('volume_id')
-        if volume_ids is None:
-            return
-        volume_ids = volume_ids.ravel()
-        n_total = len(volume_ids)
+        planes, coord, energy, plane_id, raw = self._merge_plane_dotted(
+            inst_raw, prefix='inst', value_key='charge',
+            extra_keys=('group_id',))
+        # instance = per-entry group_id
+        instance = np.concatenate(
+            [raw[p]['group_id'] for p in planes], axis=0
+        ).astype(np.int32) if planes else np.zeros(0, dtype=np.int32)
 
-        vol_indices = sorted(set(
-            k.split('_')[1] for k in labl_data
-            if k.startswith('labl_v') and k.endswith('_track_ids')
+        sub = {
+            'coord': coord, 'energy': energy, 'plane_id': plane_id,
+            'instance': instance, 'planes': planes, 'raw': raw,
+        }
+        if labl_by_volume:
+            sub['segment'] = self._decorate_inst_from_labl(
+                planes, raw, inst_raw, labl_by_volume)
+        return sub
+
+    def _build_labl(self, labl_flat):
+        """Convert flat labl_v{N}_col keys into nested {v{N}: {col: arr}}."""
+        by_volume = {}
+        for k, v in labl_flat.items():
+            # Key format: labl_v{idx}_{col}; col may contain underscores
+            assert k.startswith('labl_v'), k
+            rest = k[len('labl_v'):]
+            # Split on first underscore after idx
+            idx_end = 0
+            while idx_end < len(rest) and rest[idx_end].isdigit():
+                idx_end += 1
+            vid = 'v' + rest[:idx_end]
+            col = rest[idx_end + 1:]  # skip the separator underscore
+            by_volume.setdefault(vid, {})[col] = v
+        return by_volume
+
+    def _build_bridges(self, inst_raw):
+        """Extract per-volume bridge arrays (g2t, segment_to_group, qs_fractions)."""
+        bridges = {}
+        for k, v in inst_raw.items():
+            if (k.startswith('group_to_track_v')
+                    or k.startswith('segment_to_group_v')
+                    or k.startswith('qs_fractions_v')):
+                bridges[k] = v
+        return bridges
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_plane_dotted(raw_dict, prefix, value_key, extra_keys=()):
+        """Merge `{prefix}.{plane}.{col}` flat keys into a single point cloud.
+
+        Returns (planes, coord, energy, plane_id, raw_nested).
+        raw_nested is ``{plane_label: {'wire', 'time', value_key, *extra_keys}}``.
+        """
+        planes = sorted(set(
+            k.split('.')[1] for k in raw_dict
+            if k.startswith(prefix + '.') and k.endswith('.wire')
         ))
+        all_coord, all_val, all_plane_id = [], [], []
+        raw_nested = {}
+        for i, plane in enumerate(planes):
+            wire = raw_dict[f'{prefix}.{plane}.wire']
+            time = raw_dict[f'{prefix}.{plane}.time']
+            value = raw_dict[f'{prefix}.{plane}.{value_key}']
+            n = len(wire)
+            all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
+            all_val.append(value[:, None].astype(np.float32))
+            all_plane_id.append(np.full((n, 1), i, dtype=np.int32))
+            cols = {'wire': wire, 'time': time, value_key: value}
+            for ek in extra_keys:
+                cols[ek] = raw_dict[f'{prefix}.{plane}.{ek}']
+            raw_nested[plane] = cols
 
-        # Per-deposit instance id: glue each volume's segment_to_track
-        # into a single (N_total,) array in the order seg concatenated.
+        if planes:
+            coord = np.concatenate(all_coord, axis=0)
+            energy = np.concatenate(all_val, axis=0)
+            plane_id = np.concatenate(all_plane_id, axis=0)
+        else:
+            coord = np.zeros((0, 2), dtype=np.float32)
+            energy = np.zeros((0, 1), dtype=np.float32)
+            plane_id = np.zeros((0, 1), dtype=np.int32)
+
+        return planes, coord, energy, plane_id, raw_nested
+
+    def _decorate_seg_from_labl(self, volume_id, labl_by_volume):
+        """Broadcast per-track labl data onto each seg deposit.
+
+        Uses ``labl[vN]['segment_to_track']`` (row-aligned to the volume's
+        seg deposits) as the per-deposit FK, then looks up
+        ``labl[vN]['track_{label_key}']`` via binary search on ``track_ids``.
+        """
+        vid_flat = volume_id.ravel()
+        n_total = vid_flat.shape[0]
         instance = np.full(n_total, -1, dtype=np.int32)
         segment = np.full(n_total, -1, dtype=np.int32)
+        meta_col = f'track_{self._label_key}'
 
-        metadata_col = f'track_{self._label_key}'
-
-        for vi in vol_indices:
-            vol_num = int(vi[1:])
-            vol_mask = volume_ids == vol_num
-            if not vol_mask.any():
+        for vkey, vdata in labl_by_volume.items():
+            vol_num = int(vkey[1:])
+            mask = vid_flat == vol_num
+            if not mask.any():
                 continue
-
-            stt_key = f'labl_{vi}_segment_to_track'
-            tids_key = f'labl_{vi}_track_ids'
-            meta_key = f'labl_{vi}_{metadata_col}'
-
-            if stt_key not in labl_data:
-                continue  # volume has no per-deposit FK — skip labeling
-
-            per_deposit_tids = labl_data[stt_key].astype(np.int32)
-            n_vol = int(vol_mask.sum())
-            if len(per_deposit_tids) != n_vol:
-                # Defensive: length mismatch between seg and labl
+            if 'segment_to_track' not in vdata:
                 continue
-
-            instance[vol_mask] = per_deposit_tids
-
-            if tids_key in labl_data and meta_key in labl_data:
-                vol_tids = labl_data[tids_key]
-                vol_labels = labl_data[meta_key]
-                sort_idx = np.argsort(vol_tids)
-                sorted_tids = vol_tids[sort_idx]
-                sorted_labels = vol_labels[sort_idx]
-
-                insert_pos = np.searchsorted(sorted_tids, per_deposit_tids)
-                insert_pos = np.clip(insert_pos, 0, len(sorted_tids) - 1)
-                matched = sorted_tids[insert_pos] == per_deposit_tids
-                segment[vol_mask] = np.where(
-                    matched, sorted_labels[insert_pos], -1)
-
-        data_dict['instance'] = instance
-        data_dict['segment'] = segment
-
-    def _merge_sensor_planes(self, data_dict, sensor_data, prefix=''):
-        """Merge all sensor planes into ``{prefix}coord (M,2)``,
-        ``{prefix}energy (M,1)``, ``{prefix}plane_id (M,1)``."""
-        planes = sorted(set(
-            k.split('.')[1] for k in sensor_data if k.endswith('.wire')
-        ))
-
-        all_coord, all_energy, all_plane_id = [], [], []
-        for i, plane in enumerate(planes):
-            wire = sensor_data[f'sensor.{plane}.wire']
-            time = sensor_data[f'sensor.{plane}.time']
-            value = sensor_data[f'sensor.{plane}.value']
-            n = len(wire)
-            all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
-            all_energy.append(value[:, None].astype(np.float32))
-            all_plane_id.append(np.full((n, 1), i, dtype=np.int32))
-
-        data_dict[f'{prefix}coord'] = np.concatenate(all_coord, axis=0)
-        data_dict[f'{prefix}energy'] = np.concatenate(all_energy, axis=0)
-        data_dict[f'{prefix}plane_id'] = np.concatenate(all_plane_id, axis=0)
-
-    def _build_inst_pointcloud(self, data_dict, inst_data, labl_data, prefix=''):
-        """Build 2D labeled point cloud from inst + labl.
-
-        Each inst entry is a point: coord=(wire,time), feature=charge,
-        instance=group_id, segment from g2t+labl chain.
-        Overlapping instances at the same pixel are separate points.
-        """
-        planes = sorted(set(
-            k.split('.')[1] for k in inst_data if k.endswith('.wire')
-        ))
-
-        all_coord, all_charge, all_gid, all_segment, all_plane_id = [], [], [], [], []
-
-        for pi, plane in enumerate(planes):
-            wire_key = f'inst.{plane}.wire'
-            if wire_key not in inst_data:
+            per_dep_tid = vdata['segment_to_track'].astype(np.int32)
+            n_vol = int(mask.sum())
+            if per_dep_tid.shape[0] != n_vol:
+                log.warning("labl.%s.segment_to_track len %d != seg vol %d len %d",
+                            vkey, per_dep_tid.shape[0], vol_num, n_vol)
                 continue
+            instance[mask] = per_dep_tid
 
-            wire = inst_data[f'inst.{plane}.wire']
-            time = inst_data[f'inst.{plane}.time']
-            gid = inst_data[f'inst.{plane}.group_id']
-            charge = inst_data[f'inst.{plane}.charge']
-            n = len(wire)
+            if 'track_ids' in vdata and meta_col in vdata:
+                tids = vdata['track_ids']
+                vals = vdata[meta_col]
+                order = np.argsort(tids)
+                s_tids = tids[order]
+                s_vals = vals[order]
+                pos = np.searchsorted(s_tids, per_dep_tid)
+                pos = np.clip(pos, 0, len(s_tids) - 1)
+                matched = s_tids[pos] == per_dep_tid
+                segment[mask] = np.where(matched, s_vals[pos], -1)
 
-            all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
-            all_charge.append(charge[:, None].astype(np.float32))
-            all_gid.append(gid.astype(np.int32))
-            all_plane_id.append(np.full((n, 1), pi, dtype=np.int32))
+        return segment, instance
 
-            vol_idx = plane.split('_')[1]
-            g2t = inst_data.get(f'group_to_track_v{vol_idx}')
+    def _decorate_inst_from_labl(self, planes, raw_nested, inst_flat,
+                                 labl_by_volume):
+        """Per-inst-entry segment label via group_to_track → track lookup."""
+        meta_col = f'track_{self._label_key}'
+        all_labels = []
+        for plane in planes:
+            cols = raw_nested[plane]
+            gid = cols['group_id']
+            # plane label is 'volume_{v}_{U|V|Y}' — extract volume index
+            vol_idx_str = plane.split('_')[1]
+            vkey = f'v{vol_idx_str}'
 
+            n = gid.shape[0]
             labels = np.full(n, -1, dtype=np.int32)
-            if g2t is not None:
-                valid_gid = (gid >= 0) & (gid < len(g2t))
-                track_ids = np.where(valid_gid, g2t[gid], -1)
 
-                tids_key = f'labl_v{vol_idx}_track_ids'
-                lbl_key = f'labl_v{vol_idx}_track_{self._label_key}'
-                if tids_key in labl_data and lbl_key in labl_data:
-                    labl_tids = labl_data[tids_key]
-                    labl_vals = labl_data[lbl_key]
-                    sort_idx = np.argsort(labl_tids)
-                    sorted_tids = labl_tids[sort_idx]
-                    sorted_vals = labl_vals[sort_idx]
-                    insert_pos = np.searchsorted(sorted_tids, track_ids)
-                    insert_pos = np.clip(insert_pos, 0, len(sorted_tids) - 1)
-                    matched = sorted_tids[insert_pos] == track_ids
-                    labels[matched] = sorted_vals[insert_pos[matched]]
+            g2t_key = f'group_to_track_v{vol_idx_str}'
+            g2t = inst_flat.get(g2t_key)
+            if g2t is None or vkey not in labl_by_volume:
+                all_labels.append(labels)
+                continue
+            vdata = labl_by_volume[vkey]
+            if 'track_ids' not in vdata or meta_col not in vdata:
+                all_labels.append(labels)
+                continue
 
-            all_segment.append(labels)
+            valid = (gid >= 0) & (gid < len(g2t))
+            tids = np.where(valid, g2t[gid], -1)
+            labl_tids = vdata['track_ids']
+            labl_vals = vdata[meta_col]
+            order = np.argsort(labl_tids)
+            s_tids = labl_tids[order]
+            s_vals = labl_vals[order]
+            pos = np.searchsorted(s_tids, tids)
+            pos = np.clip(pos, 0, len(s_tids) - 1)
+            matched = s_tids[pos] == tids
+            labels[matched] = s_vals[pos[matched]]
+            all_labels.append(labels)
 
-        if not all_coord:
-            return
-
-        data_dict[f'{prefix}coord'] = np.concatenate(all_coord, axis=0)
-        data_dict[f'{prefix}energy'] = np.concatenate(all_charge, axis=0)
-        data_dict[f'{prefix}instance'] = np.concatenate(all_gid, axis=0)
-        data_dict[f'{prefix}segment'] = np.concatenate(all_segment, axis=0)
-        data_dict[f'{prefix}plane_id'] = np.concatenate(all_plane_id, axis=0)
+        if not all_labels:
+            return np.zeros(0, dtype=np.int32)
+        return np.concatenate(all_labels, axis=0)
 
     def get_data_name(self, idx):
         reader = self._canonical_reader
@@ -410,9 +449,10 @@ class JAXTPCDataset(DefaultDataset):
         return f"{fname}_evt{event_num:03d}"
 
     def prepare_test_data(self, idx):
-        """Test-time data prep. More lenient than DefaultDataset:
-        ``segment`` is only copied into result_dict when present
-        (unlabeled modes e.g. sensor-only don't produce a segment key).
+        """Test-time data prep.
+
+        Expects ``segment`` to be produced at the top level by a terminal
+        :class:`Collect` transform (e.g. ``Collect(stream='seg', ...)``).
         """
         data_dict = self.get_data(idx)
         data_dict = self.transform(data_dict)

@@ -46,11 +46,13 @@ def test_compose_rejects_non_callable_non_dict():
 
 
 def test_transforms_registered_count():
-    # 45 from transform.py + PDGToSemantic from detector_transforms.py
-    assert len(TRANSFORMS) >= 46
+    # 45 from transform.py + PDGToSemantic/RemapSegment/ApplyToStream from
+    # detector_transforms.py.
+    assert len(TRANSFORMS) >= 48
     # A few anchor cases
     for name in ('ToTensor', 'GridSample', 'Collect', 'NormalizeCoord',
-                 'RandomRotate', 'PDGToSemantic'):
+                 'RandomRotate', 'PDGToSemantic', 'ApplyToStream',
+                 'RemapSegment'):
         assert TRANSFORMS.get(name) is not None, f"{name} missing"
 
 
@@ -64,17 +66,21 @@ def test_build_dataset_resolves_by_type(jaxtpc_data_root):
 
 
 def test_end_to_end_transform_collate(jaxtpc_data_root):
+    """Pipeline: ApplyToStream scopes per-cloud transforms, Collect flattens."""
     transform = [
-        dict(type='NormalizeCoord', center=[0, 0, 0], scale=4000.0),
-        dict(type='GridSample', grid_size=0.001, hash_type='fnv',
-             mode='train', return_grid_coord=True),
+        dict(type='ApplyToStream', stream='seg', transforms=[
+            dict(type='NormalizeCoord', center=[0, 0, 0], scale=4000.0),
+            dict(type='GridSample', grid_size=0.001, hash_type='fnv',
+                 mode='train', return_grid_coord=True),
+        ]),
         dict(type='ToTensor'),
-        dict(type='Collect', keys=('coord', 'grid_coord', 'segment'),
+        dict(type='Collect', stream='seg',
+             keys=('coord', 'grid_coord', 'segment'),
              feat_keys=('coord', 'energy')),
     ]
     ds = JAXTPCDataset(data_root=jaxtpc_data_root, split='',
                        dataset_name='sim',
-                       modalities=('seg', 'labl'), label_key='particle',
+                       modalities=('seg', 'labl'), label_key='pdg',
                        min_deposits=1024, max_len=4, transform=transform)
     batch = collate_fn([ds[0], ds[1]])
     assert batch['coord'].shape[1] == 3
@@ -85,10 +91,14 @@ def test_end_to_end_transform_collate(jaxtpc_data_root):
 
 
 def test_dataset_getitem_uses_transforms(jaxtpc_data_root):
-    """Single-sample path: transforms applied on ds[idx]."""
+    """Single-sample path: transforms applied on ds[idx].
+
+    ToTensor recurses into nested sub-dicts, so seg['coord'] becomes a
+    tensor in place.
+    """
     transform = [dict(type='ToTensor')]
     ds = JAXTPCDataset(data_root=jaxtpc_data_root, split='',
                        dataset_name='sim', modalities=('seg',),
                        max_len=1, transform=transform)
     s = ds[0]
-    assert torch.is_tensor(s['coord'])
+    assert torch.is_tensor(s['seg']['coord'])
