@@ -1,15 +1,23 @@
 """
-LUCiDSegReader — reads 3D track segments from Water Cherenkov segment files.
+LUCiDSegReader — 3D segment deposits from LUCiD ``seg/`` HDF5 files
+(``format_version: 3``).
 
-Format: flat CSR arrays (no per-event groups).
-  - track_event_offset (n_events+1,) — CSR into track arrays
-  - segment_offset (n_tracks+1,) — CSR into segment arrays
-  - start_x/y/z, end_x/y/z, edep, time (total_segments,) — per-segment
-  - track_id, pdg, parent_id, initial_energy (n_tracks,) — per-track
+Each ``event_XXX`` holds per-segment arrays. One "segment" is one
+Geant4 step; many segments per track, many tracks per particle
+(``particle_idx`` = FK into :class:`LUCiDLablReader`'s ``per_particle``;
+``track_idx`` = FK into ``per_track``).
 
 Output dict:
-    coord (N,3), energy (N,1), time (N,1),
-    track_ids (N,), pdg (N,), parent_ids (N,)
+
+    coord       (N,3) float32   midpoint of start/end
+    energy      (N,1) float32   edep
+    time        (N,1) float32
+    track_idx   (N,)  int32     FK → labl.per_track
+
+    (include_physics=True adds:)
+    direction   (N,3) float32   unit direction
+    beta_start  (N,1) float32   initial beta (v/c) at segment start
+    n_cherenkov (N,1) int32     number of Cherenkov photons produced
 """
 
 import os
@@ -22,46 +30,45 @@ log = logging.getLogger(__name__)
 
 
 class LUCiDSegReader:
-    """Reads 3D track segments from WC segment HDF5 files.
+    """Reads 3D segment deposits from LUCiD ``seg/`` files.
 
     Parameters
     ----------
     data_root : str
-        Directory containing segment shard files.
+        Directory containing seg shard files.
     split : str
-        Split name.
+        Split name (used as subdirectory when present).
     dataset_name : str
-        File prefix — matches files like '{dataset_name}_seg_*.h5'
-        or 'segment_events_*.h5'.
+        File prefix — matches ``{dataset_name}_seg_*.h5``.
     min_segments : int
-        Minimum segments per event to include.
+        Drop events with fewer than this many segments.
+    include_physics : bool
+        Also emit ``direction``, ``beta_start``, ``n_cherenkov``.
     """
 
     def __init__(self, data_root, split='', dataset_name='wc',
-                 min_segments=0, **kwargs):
+                 min_segments=0, include_physics=True, **kwargs):
         self.data_root = data_root
         self.split = split
         self.dataset_name = dataset_name
-        self.min_segments = min_segments
+        self.min_segments = int(min_segments)
+        self.include_physics = bool(include_physics)
 
         self.h5_files = self._find_files()
         assert len(self.h5_files) > 0, (
-            f"No WC seg files found in {data_root}/{split}")
+            f"No LUCiD seg files found for '{dataset_name}' in "
+            f"{data_root}/{split}")
 
         self._initted = False
         self._h5data = []
         self._build_index()
 
     def _find_files(self):
-        """Find segment HDF5 files. Tries multiple naming patterns."""
-        for pattern in [
-            os.path.join(self.data_root, self.split, f'{self.dataset_name}_seg_*.h5'),
+        for pattern in (
+            os.path.join(self.data_root, self.split,
+                         f'{self.dataset_name}_seg_*.h5'),
             os.path.join(self.data_root, f'{self.dataset_name}_seg_*.h5'),
-            os.path.join(self.data_root, self.split, 'segment_events_*.h5'),
-            os.path.join(self.data_root, 'segment_events_*.h5'),
-            os.path.join(self.data_root, self.split, '*segment*.h5'),
-            os.path.join(self.data_root, '*segment*.h5'),
-        ]:
+        ):
             files = sorted(glob.glob(pattern))
             if files:
                 return files
@@ -70,43 +77,34 @@ class LUCiDSegReader:
     def _build_index(self):
         self.cumulative_lengths = []
         self.indices = []
-        self._file_n_events = []
 
         for h5_path in self.h5_files:
             try:
                 with h5py.File(h5_path, 'r', libver='latest', swmr=True) as f:
-                    n_events = int(f.attrs.get('n_events', 0))
-                    if n_events == 0 and 'event_number' in f:
-                        n_events = f['event_number'].shape[0]
-
-                    if self.min_segments > 0 and 'segment_offset' in f and 'track_event_offset' in f:
-                        track_offsets = f['track_event_offset'][:]
-                        seg_offsets = f['segment_offset'][:]
+                    n_events = int(f['config'].attrs['n_events'])
+                    if self.min_segments > 0:
                         valid = []
                         for i in range(n_events):
-                            t0 = track_offsets[i]
-                            t1 = track_offsets[i + 1]
-                            if t1 > t0:
-                                n_seg = int(seg_offsets[t1] - seg_offsets[t0])
-                            else:
-                                n_seg = 0
+                            ek = f'event_{i:03d}'
+                            if ek not in f:
+                                continue
+                            n_seg = int(f[ek].attrs.get('n_segments', 0))
                             if n_seg >= self.min_segments:
                                 valid.append(i)
                         index = np.array(valid, dtype=np.int64)
                     else:
                         index = np.arange(n_events, dtype=np.int64)
-                    self._file_n_events.append(n_events)
             except Exception as e:
                 log.warning("Error processing %s: %s", h5_path, e)
                 index = np.array([], dtype=np.int64)
-                self._file_n_events.append(0)
 
             self.cumulative_lengths.append(len(index))
             self.indices.append(index)
 
         self.cumulative_lengths = np.cumsum(self.cumulative_lengths)
-        log.info("LUCiDSegReader: %d events from %d files",
-                 self.cumulative_lengths[-1], len(self.h5_files))
+        log.info("LUCiDSegReader: %d events from %d files (min_segments=%d)",
+                 self.cumulative_lengths[-1], len(self.h5_files),
+                 self.min_segments)
 
     def h5py_worker_init(self):
         self._h5data = [
@@ -116,75 +114,54 @@ class LUCiDSegReader:
         self._initted = True
 
     def _locate_event(self, idx):
-        file_idx = int(np.searchsorted(self.cumulative_lengths, idx, side='right'))
-        local_idx = idx - (int(self.cumulative_lengths[file_idx - 1]) if file_idx > 0 else 0)
+        file_idx = int(np.searchsorted(self.cumulative_lengths, idx,
+                                       side='right'))
+        local_idx = idx - (int(self.cumulative_lengths[file_idx - 1])
+                           if file_idx > 0 else 0)
         event_num = self.indices[file_idx][local_idx]
-        return self._h5data[file_idx], event_num
+        return self._h5data[file_idx], f'event_{event_num:03d}'
 
     def read_event(self, idx):
         if not self._initted:
             self.h5py_worker_init()
 
-        f, event_num = self._locate_event(idx)
+        f, event_key = self._locate_event(idx)
+        evt = f[event_key]
 
-        track_offsets = f['track_event_offset']
-        t0 = int(track_offsets[event_num])
-        t1 = int(track_offsets[event_num + 1])
-        n_tracks = t1 - t0
+        sx = evt['start_x'][:].astype(np.float32)
+        sy = evt['start_y'][:].astype(np.float32)
+        sz = evt['start_z'][:].astype(np.float32)
+        ex = evt['end_x'][:].astype(np.float32)
+        ey = evt['end_y'][:].astype(np.float32)
+        ez = evt['end_z'][:].astype(np.float32)
 
-        if n_tracks == 0:
-            return self._empty_dict()
+        coord = np.stack([(sx + ex) * 0.5,
+                          (sy + ey) * 0.5,
+                          (sz + ez) * 0.5], axis=1)
 
-        seg_offsets = f['segment_offset']
-        s0 = int(seg_offsets[t0])
-        s1 = int(seg_offsets[t1])
-        n_seg = s1 - s0
-
-        if n_seg == 0:
-            return self._empty_dict()
-
-        sx = f['start_x'][s0:s1]
-        sy = f['start_y'][s0:s1]
-        sz = f['start_z'][s0:s1]
-        ex = f['end_x'][s0:s1]
-        ey = f['end_y'][s0:s1]
-        ez = f['end_z'][s0:s1]
-
-        mid_x = (sx + ex) / 2
-        mid_y = (sy + ey) / 2
-        mid_z = (sz + ez) / 2
-
-        track_ids = f['track_id'][t0:t1].astype(np.int32)
-        pdg = f['pdg'][t0:t1].astype(np.int32)
-        parent_ids = f['parent_id'][t0:t1].astype(np.int32)
-
-        n_segs_per_track = np.diff(seg_offsets[t0:t1 + 1]).astype(np.int32)
-
-        seg_track_ids = np.repeat(track_ids, n_segs_per_track)
-        seg_pdg = np.repeat(pdg, n_segs_per_track)
-        seg_parent_ids = np.repeat(parent_ids, n_segs_per_track)
-
-        return {
-            'coord': np.stack([mid_x, mid_y, mid_z], axis=1).astype(np.float32),
-            'energy': f['edep'][s0:s1].astype(np.float32)[:, None],
-            'time': f['time'][s0:s1].astype(np.float32)[:, None],
-            'track_ids': seg_track_ids,
-            'pdg': seg_pdg,
-            'parent_ids': seg_parent_ids,
+        data = {
+            'coord': coord,
+            'energy': evt['edep'][:].astype(np.float32)[:, None],
+            'time': evt['time'][:].astype(np.float32)[:, None],
+            'track_idx': evt['track_idx'][:].astype(np.int32),
         }
 
-    def _empty_dict(self):
-        return {
-            'coord': np.zeros((0, 3), dtype=np.float32),
-            'energy': np.zeros((0, 1), dtype=np.float32),
-            'time': np.zeros((0, 1), dtype=np.float32),
-            'track_ids': np.zeros((0,), dtype=np.int32),
-            'pdg': np.zeros((0,), dtype=np.int32),
-            'parent_ids': np.zeros((0,), dtype=np.int32),
-        }
+        if self.include_physics:
+            direction = np.stack([evt['dir_x'][:].astype(np.float32),
+                                  evt['dir_y'][:].astype(np.float32),
+                                  evt['dir_z'][:].astype(np.float32)],
+                                 axis=1)
+            data['direction'] = direction
+            data['beta_start'] = evt['beta_start'][:].astype(
+                np.float32)[:, None]
+            data['n_cherenkov'] = evt['n_cherenkov'][:].astype(
+                np.int32)[:, None]
+
+        return data
 
     def __len__(self):
-        return int(self.cumulative_lengths[-1]) if len(self.cumulative_lengths) > 0 else 0
+        return (int(self.cumulative_lengths[-1])
+                if len(self.cumulative_lengths) > 0 else 0)
 
     def close(self):
         if self._initted:

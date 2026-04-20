@@ -1,9 +1,43 @@
 """
-LUCiDDataset — dataset for Water Cherenkov detector simulation output.
+LUCiDDataset — multimodal dataset for LUCiD Water Cherenkov simulation
+output (``format_version: 3``).
 
-Loads PMT sensor data and/or 3D track segments. Inherits from
-:class:`pimm_data.DefaultDataset` so transforms, test_mode, loop and
-max_len work out of the box.
+Loads from co-indexed per-modality HDF5 shards:
+
+* ``seg/``    — 3D Geant4 step deposits
+* ``sensor/`` — sparse PMT response (event-level aggregate of ``inst``)
+* ``inst/``   — per-particle PMT hit decomposition
+* ``labl/``   — per-event / per-particle / per-track label tables
+
+Returns a **nested** dict: each loaded modality owns a sub-dict with
+clean, unprefixed keys::
+
+    {
+      'seg':    {'coord': (N,3), 'energy': (N,1), 'time': (N,1),
+                 'track_idx': (N,), 'direction': ..., 'beta_start': ...,
+                 'n_cherenkov': ..., 'instance': (N,), 'segment': (N,)},
+      'sensor': {'coord': (H,3), 'energy': (H,1), 'time': (H,1),
+                 'sensor_idx': (H,)},
+      'inst':   {'coord': (E,3), 'energy': (E,1), 'time': (E,1),
+                 'sensor_idx': (E,), 'particle_idx': (E,),
+                 'instance': (E,), 'segment': (E,)},
+      'labl':   {'event': {...}, 'particle': {...}, 'track': {...}},
+      'name': str, 'split': str,
+    }
+
+Instance / segment labels (``inst`` and ``seg``) are *particle-level* by
+default: ``instance = particle_idx`` and ``segment = per_particle.category``.
+For coarser groupings (ancestor-level), use
+``labl.particle.ancestor_particle_idx`` (or ``labl.track.ancestor_particle_idx``
+for seg) in a downstream transform — this is a one-line lookup, so we keep
+the dataset free of grouping policy.
+
+Missing modalities have no top-level key. Two modality combinations are
+rejected: ``('labl',)`` alone, and ``('sensor', 'labl')``. ``labl`` is a
+dimension table and needs an instance-bearing modality (``seg`` or
+``inst``) to attach to.
+
+Registered in :data:`pimm_data.DATASETS`.
 """
 
 import os
@@ -16,39 +50,38 @@ from .builder import DATASETS
 from .defaults import DefaultDataset
 from .readers.lucid_seg import LUCiDSegReader
 from .readers.lucid_sensor import LUCiDSensorReader
+from .readers.lucid_inst import LUCiDInstReader
+from .readers.lucid_labl import LUCiDLablReader
 
 log = logging.getLogger(__name__)
+
+_VALID_MODALITIES = {'seg', 'sensor', 'inst', 'labl'}
 
 
 @DATASETS.register_module()
 class LUCiDDataset(DefaultDataset):
-    """Water Cherenkov detector dataset.
+    """Water Cherenkov multimodal dataset with nested per-stream output.
 
     Parameters
     ----------
     data_root : str
-        Root directory with seg/ and/or sensor/ subdirectories.
+        Root directory containing per-modality subdirectories.
     split : str
         Split name for file discovery.
     modalities : tuple[str]
-        Which to load: 'seg', 'sensor'.
+        Any subset of ``{'seg', 'sensor', 'inst', 'labl'}``.
+        ``('labl',)`` and ``('sensor', 'labl')`` are invalid.
     dataset_name : str
-        File prefix (e.g., 'wc' for 'wc_seg_0000.h5').
-    output_mode : str
-        How to format sensor data for the model:
-        - 'response': PMT point cloud with total PE/T features
-        - 'labels': sparse per-particle entries with instance/semantic labels
-        - 'separate': keep raw reader keys (pmt_coord, pmt_pe, pp_* keys)
-    include_labels : bool
-        Whether sensor reader loads per-particle decomposition.
-    pe_threshold : float
-        Minimum PE for sparsifying PE_per_particle.
+        File prefix (e.g. ``'wc'`` matches ``wc_seg_0000.h5``).
     min_segments : int
-        Minimum segments per event (seg reader filter).
-    pmt_positions : ndarray or None
-        Optional PMT positions override for LUCiDSensorReader.
-    pmt_positions_file : str or None
-        Optional .npy path with PMT positions.
+        Drop events with fewer than this many seg segments (seg only).
+    include_physics : bool
+        Whether seg emits direction / beta_start / n_cherenkov.
+    pe_threshold : float
+        Drop inst entries with ``pp_pe <= pe_threshold`` (inst only).
+    pmt_positions, pmt_positions_file : optional
+        Overrides for sensor geometry — normally the file's
+        ``config/sensor_positions`` is used.
     transform, test_mode, test_cfg, loop, max_len, ignore_index, cache :
         Standard :class:`DefaultDataset` parameters.
     """
@@ -59,10 +92,9 @@ class LUCiDDataset(DefaultDataset):
         split='',
         modalities=('sensor',),
         dataset_name='wc',
-        output_mode='response',
-        include_labels=True,
-        pe_threshold=0.0,
         min_segments=0,
+        include_physics=True,
+        pe_threshold=0.0,
         pmt_positions=None,
         pmt_positions_file=None,
         transform=None,
@@ -74,36 +106,46 @@ class LUCiDDataset(DefaultDataset):
         cache=False,
     ):
         self._modalities = tuple(modalities)
+        self._validate_modalities(self._modalities)
+
         self._dataset_name = dataset_name
-        self._output_mode = output_mode
         self._max_len = max_len
         self._source_data_root = data_root
         self._source_split = split
 
         self.seg_reader = None
         self.sensor_reader = None
+        self.inst_reader = None
+        self.labl_reader = None
 
         if 'seg' in self._modalities:
-            seg_root = self._modality_root('seg')
             self.seg_reader = LUCiDSegReader(
-                data_root=seg_root, split=split,
-                dataset_name=dataset_name, min_segments=min_segments)
+                data_root=self._modality_root('seg'), split=split,
+                dataset_name=dataset_name, min_segments=min_segments,
+                include_physics=include_physics)
 
         if 'sensor' in self._modalities:
-            sensor_root = self._modality_root('sensor')
             self.sensor_reader = LUCiDSensorReader(
-                data_root=sensor_root, split=split,
+                data_root=self._modality_root('sensor'), split=split,
                 dataset_name=dataset_name,
-                include_labels=include_labels,
-                pe_threshold=pe_threshold,
                 pmt_positions=pmt_positions,
                 pmt_positions_file=pmt_positions_file)
 
-        active_readers = [r for r in (self.seg_reader, self.sensor_reader)
+        if 'inst' in self._modalities:
+            self.inst_reader = LUCiDInstReader(
+                data_root=self._modality_root('inst'), split=split,
+                dataset_name=dataset_name, pe_threshold=pe_threshold)
+
+        if 'labl' in self._modalities:
+            self.labl_reader = LUCiDLablReader(
+                data_root=self._modality_root('labl'), split=split,
+                dataset_name=dataset_name)
+
+        active_readers = [r for r in (self.seg_reader, self.sensor_reader,
+                                      self.inst_reader, self.labl_reader)
                           if r is not None]
-        if not active_readers:
-            raise ValueError(f"Need 'seg' or 'sensor' in modalities, got {self._modalities}")
-        self._canonical_reader = active_readers[0]
+        self._canonical_reader = (self.seg_reader or self.inst_reader
+                                  or self.sensor_reader or self.labl_reader)
         self._n_events = min(len(r) for r in active_readers)
 
         super().__init__(
@@ -112,6 +154,25 @@ class LUCiDDataset(DefaultDataset):
             cache=cache, ignore_index=ignore_index, loop=loop,
         )
 
+    @staticmethod
+    def _validate_modalities(modalities):
+        mods = set(modalities)
+        if not mods:
+            raise ValueError("modalities is empty; must load at least one")
+        unknown = mods - _VALID_MODALITIES
+        if unknown:
+            raise ValueError(
+                f"Unknown modalities {unknown}; valid: {_VALID_MODALITIES}")
+        if mods == {'labl'}:
+            raise ValueError(
+                "Invalid modality combination ('labl',): labl is a "
+                "dimension table and requires 'seg' or 'inst' to attach to.")
+        if mods == {'sensor', 'labl'}:
+            raise ValueError(
+                "Invalid modality combination ('sensor', 'labl'): sensor "
+                "has no particle separation — labl can't be attached. Add "
+                "'inst' or 'seg' to the modalities tuple.")
+
     def _modality_root(self, modality):
         mod_dir = os.path.join(self._source_data_root, modality)
         if os.path.isdir(mod_dir):
@@ -119,7 +180,6 @@ class LUCiDDataset(DefaultDataset):
         return self._source_data_root
 
     def get_data_list(self):
-        """Range of event indices, optionally capped by max_len."""
         n = getattr(self, '_n_events', 0)
         max_len = getattr(self, '_max_len', -1)
         if max_len > 0:
@@ -128,64 +188,188 @@ class LUCiDDataset(DefaultDataset):
 
     def get_data(self, idx):
         real_idx = idx % len(self.data_list)
-        data_dict = {}
 
-        if self.seg_reader is not None:
-            seg_data = self.seg_reader.read_event(real_idx)
-            if self.sensor_reader is not None and self._output_mode == 'separate':
-                for k, v in seg_data.items():
-                    data_dict[f'seg3d.{k}'] = v
-            else:
-                data_dict.update(seg_data)
+        data = {
+            'name': self.get_data_name(real_idx),
+            'split': self.split if isinstance(self.split, str) else 'custom',
+        }
+
+        labl = None
+        if self.labl_reader is not None:
+            labl = self._build_labl(self.labl_reader.read_event(real_idx))
+            data['labl'] = labl
 
         if self.sensor_reader is not None:
-            sensor_data = self.sensor_reader.read_event(real_idx)
+            data['sensor'] = self._build_sensor(
+                self.sensor_reader.read_event(real_idx))
 
-            if self._output_mode == 'response':
-                n = len(sensor_data['pmt_pe'])
-                if 'pmt_coord' in sensor_data:
-                    data_dict['coord'] = sensor_data['pmt_coord']
-                else:
-                    data_dict['coord'] = np.arange(n, dtype=np.float32)[:, None]
-                data_dict['energy'] = sensor_data['pmt_pe'][:, None]
-                data_dict['time'] = sensor_data['pmt_t'][:, None]
+        if self.inst_reader is not None:
+            data['inst'] = self._build_inst(
+                self.inst_reader.read_event(real_idx), labl)
 
-            elif self._output_mode == 'labels':
-                if 'pp_sensor_idx' in sensor_data:
-                    sidx = sensor_data['pp_sensor_idx']
-                    if 'pmt_coord' in sensor_data:
-                        data_dict['coord'] = sensor_data['pmt_coord'][sidx]
-                    else:
-                        data_dict['coord'] = sidx.astype(np.float32)[:, None]
-                    data_dict['energy'] = sensor_data['pp_pe'][:, None]
-                    data_dict['segment'] = sensor_data['pp_category']
-                    data_dict['instance'] = sensor_data['pp_particle_idx']
-                    if 'pp_t' in sensor_data:
-                        data_dict['time'] = sensor_data['pp_t'][:, None]
+        if self.seg_reader is not None:
+            data['seg'] = self._build_seg(
+                self.seg_reader.read_event(real_idx), labl)
 
-            elif self._output_mode == 'separate':
-                data_dict.update(sensor_data)
+        return data
 
-        data_dict['name'] = self.get_data_name(real_idx)
-        data_dict['split'] = self.split if isinstance(self.split, str) else 'custom'
-        return data_dict
+    # ------------------------------------------------------------------
+    # Per-modality builders
+    # ------------------------------------------------------------------
+
+    def _build_sensor(self, raw):
+        """Sparse PMT point cloud: coord indexed by sensor_idx."""
+        sensor_idx = raw['sensor_idx']
+        pmt_coord = raw.get('pmt_coord')
+        if pmt_coord is not None:
+            coord = pmt_coord[sensor_idx].astype(np.float32)
+        else:
+            coord = sensor_idx.astype(np.float32)[:, None]
+        return {
+            'coord': coord,
+            'energy': raw['pmt_pe'][:, None].astype(np.float32),
+            'time': raw['pmt_t'][:, None].astype(np.float32),
+            'sensor_idx': sensor_idx,
+        }
+
+    def _build_inst(self, raw, labl):
+        """Per-particle PMT hit point cloud.
+
+        Duplicate points are intentional: same PMT contributed by N
+        particles → N rows. ``instance = particle_idx`` tags each row.
+        """
+        pp_sensor_idx = raw['pp_sensor_idx']
+        pp_particle_idx = raw['pp_particle_idx']
+
+        pmt_coord = None
+        if self.sensor_reader is not None:
+            # Reuse the geometry already loaded by the sensor reader.
+            pmt_coord = getattr(self.sensor_reader, '_pmt_positions', None)
+        if pmt_coord is None:
+            # Pull directly from the inst file's own config group.
+            pmt_coord = self._inst_sensor_positions()
+
+        if pmt_coord is not None:
+            coord = pmt_coord[pp_sensor_idx].astype(np.float32)
+        else:
+            coord = pp_sensor_idx.astype(np.float32)[:, None]
+
+        sub = {
+            'coord': coord,
+            'energy': raw['pp_pe'][:, None].astype(np.float32),
+            'time': raw['pp_t'][:, None].astype(np.float32),
+            'sensor_idx': pp_sensor_idx,
+            'particle_idx': pp_particle_idx,
+            'instance': pp_particle_idx.astype(np.int32),
+        }
+        if labl is not None:
+            category = labl['particle'].get('category')
+            if category is not None:
+                sub['segment'] = self._lookup_per_particle(
+                    pp_particle_idx, category)
+        return sub
+
+    def _build_seg(self, raw, labl):
+        """3D deposit cloud decorated with particle-level labels from labl."""
+        sub = dict(raw)  # shallow copy; readers emit fresh arrays
+        track_idx = sub['track_idx']
+
+        if labl is not None:
+            track_tbl = labl['track']
+            track_particle_idx = track_tbl.get('particle_idx')
+            if track_particle_idx is not None:
+                particle_idx = self._lookup_per_track(
+                    track_idx, track_particle_idx)
+                sub['particle_idx'] = particle_idx
+                sub['instance'] = particle_idx
+                category = labl['particle'].get('category')
+                if category is not None:
+                    sub['segment'] = self._lookup_per_particle(
+                        particle_idx, category)
+        return sub
+
+    def _build_labl(self, flat):
+        """Rebuild nested ``{event, particle, track}`` dict from flat keys."""
+        out = {'event': {}, 'particle': {}, 'track': {}}
+        for k, v in flat.items():
+            if k.startswith('labl_event_'):
+                out['event'][k[len('labl_event_'):]] = v
+            elif k.startswith('labl_particle_'):
+                out['particle'][k[len('labl_particle_'):]] = v
+            elif k.startswith('labl_track_'):
+                out['track'][k[len('labl_track_'):]] = v
+        return out
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _inst_sensor_positions(self):
+        """Best-effort fetch of inst's config/sensor_positions.
+
+        The inst file duplicates the sensor geometry; fall back to it
+        when no sensor reader is active.
+        """
+        reader = self.inst_reader
+        if reader is None:
+            return None
+        if not reader._initted:
+            reader.h5py_worker_init()
+        try:
+            cfg = reader._h5data[0]['config']
+            if 'sensor_positions' in cfg:
+                return cfg['sensor_positions'][:].astype(np.float32)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _lookup_per_particle(particle_idx, per_particle_col,
+                             fill=-1):
+        """Gather per-particle values for each row's particle_idx."""
+        n = per_particle_col.shape[0]
+        valid = (particle_idx >= 0) & (particle_idx < n)
+        out = np.full(particle_idx.shape, fill,
+                      dtype=per_particle_col.dtype)
+        if valid.any():
+            out[valid] = per_particle_col[particle_idx[valid]]
+        return out
+
+    @staticmethod
+    def _lookup_per_track(track_idx, per_track_col, fill=-1):
+        """Gather per-track values for each row's track_idx."""
+        n = per_track_col.shape[0]
+        valid = (track_idx >= 0) & (track_idx < n)
+        out = np.full(track_idx.shape, fill, dtype=per_track_col.dtype)
+        if valid.any():
+            out[valid] = per_track_col[track_idx[valid]]
+        return out
 
     def get_data_name(self, idx):
         reader = self._canonical_reader
-        file_idx = int(np.searchsorted(reader.cumulative_lengths, idx, side='right'))
-        local = idx - (int(reader.cumulative_lengths[file_idx - 1]) if file_idx > 0 else 0)
+        file_idx = int(np.searchsorted(reader.cumulative_lengths, idx,
+                                       side='right'))
+        local = idx - (int(reader.cumulative_lengths[file_idx - 1])
+                       if file_idx > 0 else 0)
         event_num = reader.indices[file_idx][local]
         fname = os.path.basename(reader.h5_files[file_idx])
         return f"{fname}_evt{event_num:03d}"
 
     def prepare_test_data(self, idx):
-        """More lenient than DefaultDataset: ``segment`` is only copied into
-        result_dict when present (response mode has no labels)."""
+        """Test-time data prep.
+
+        Expects a terminal ``Collect`` transform to lift a ``segment``
+        stream to the top level (same contract as JAXTPCDataset).
+        """
         data_dict = self.get_data(idx)
         data_dict = self.transform(data_dict)
         result_dict = dict(name=data_dict.pop("name"))
         if "segment" in data_dict:
             result_dict["segment"] = data_dict.pop("segment")
+        if "origin_segment" in data_dict:
+            assert "inverse" in data_dict
+            result_dict["origin_segment"] = data_dict.pop("origin_segment")
+            result_dict["inverse"] = data_dict.pop("inverse")
 
         data_dict_list = [aug(deepcopy(data_dict)) for aug in self.aug_transform]
         fragment_list = []
@@ -206,8 +390,9 @@ class LUCiDDataset(DefaultDataset):
         return result_dict
 
     def __del__(self):
-        for reader in (getattr(self, 'seg_reader', None),
-                       getattr(self, 'sensor_reader', None)):
+        for attr in ('seg_reader', 'sensor_reader',
+                     'inst_reader', 'labl_reader'):
+            reader = getattr(self, attr, None)
             if reader is not None:
                 try:
                     reader.close()

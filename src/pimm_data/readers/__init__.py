@@ -11,6 +11,8 @@ from .jaxtpc_labl import JAXTPCLablReader
 from .jaxtpc_inst import JAXTPCInstReader
 from .lucid_seg import LUCiDSegReader
 from .lucid_sensor import LUCiDSensorReader
+from .lucid_inst import LUCiDInstReader
+from .lucid_labl import LUCiDLablReader
 
 __all__ = [
     "JAXTPCSegReader",
@@ -19,4 +21,6 @@ __all__ = [
     "JAXTPCInstReader",
     "LUCiDSegReader",
     "LUCiDSensorReader",
+    "LUCiDInstReader",
+    "LUCiDLablReader",
 ]
