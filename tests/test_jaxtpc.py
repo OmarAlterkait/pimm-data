@@ -1,9 +1,9 @@
 """Tests for JAXTPCDataset core loading logic (no transforms).
 
 These complement ``test_jaxtpc_task_matrix.py``: where the matrix tests
-cover every DATASET_DESIGN.md row structurally, these test orthogonal
-concerns — volume filtering, label_key variants, DataLoader fork-safety,
-and name/split metadata.
+cover every modality combination structurally (see README §Modality
+combinations), these test orthogonal concerns — volume filtering,
+label_key variants, DataLoader fork-safety, and name/split metadata.
 """
 
 import numpy as np

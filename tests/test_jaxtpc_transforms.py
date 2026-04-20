@@ -3,7 +3,8 @@
 For every 'typical' transform and every stream (3D seg, 2D inst, 2D sensor),
 build a tiny pipeline with ApplyToStream + the transform, run it, and check
 the output shape is sensible. This documents — and enforces — the supported
-recipes in DETECTOR_DATASET.md.
+recipes for using transforms on nested sub-dicts (see README §Using with
+transforms).
 """
 
 import numpy as np
@@ -264,7 +265,7 @@ def test_recipe_3d_supervised_seg(jaxtpc_data_root):
 
 
 def test_recipe_2d_supervised_inst(jaxtpc_data_root):
-    """2D supervised-on-inst pipeline (row 7 of DATASET_DESIGN)."""
+    """2D supervised-on-inst pipeline (inst+labl combo)."""
     ds = _ds(jaxtpc_data_root, ('inst', 'labl'),
              transform=[
                  dict(type='ApplyToStream', stream='inst', transforms=[

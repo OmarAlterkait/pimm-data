@@ -5,7 +5,7 @@ produces a nested dict {'seg': {...}, 'sensor': {...}, 'inst': {...},
 'labl': {...}, 'bridges': {...}, 'name', 'split'}. Missing modalities
 have no top-level key. No bare 'coord', no flat namespaced aliases.
 
-Rows cross-reference docs/DATASET_DESIGN.md task matrix.
+Rows cross-reference the modality matrix in README §Modality combinations.
 """
 
 import numpy as np
@@ -196,7 +196,7 @@ def test_row13_joint_multitask(jaxtpc_data_root):
     assert len(lens) == 3, f"expected three distinct sizes, got {lens}"
 
 
-# ---------- Invalid combinations (DATASET_DESIGN.md §Invalid) ----------
+# ---------- Invalid combinations (see README §Modality combinations) ----------
 
 def test_invalid_sensor_plus_labl_only(jaxtpc_data_root):
     """sensor+labl alone must raise — no bridge to attach labels."""
@@ -270,7 +270,7 @@ def test_sensor_and_inst_raw_are_nested(jaxtpc_data_root):
             assert 'wire' in cols and 'time' in cols
 
 
-# ---------- Enforce the DETECTOR_DATASET.md combination matrix ----------
+# ---------- Enforce the README §Modality combinations matrix ----------
 #
 # Every row of the matrix is expressed as (combo, expected truth-flags). This
 # test fails if any future dataset change drifts from the documented matrix.

@@ -8,8 +8,8 @@ Loads from co-indexed HDF5 files produced by JAXTPC's production pipeline:
 * ``inst/`` — per-instance sensor decomposition
 * ``labl/`` — track_id → label lookup tables
 
-Modality strings follow ``docs/DATASET_DESIGN.md``: ``'seg'``, ``'sensor'``,
-``'inst'``, ``'labl'``.
+Modality strings: ``'seg'``, ``'sensor'``, ``'inst'``, ``'labl'``. See
+README §Modality combinations for the combination matrix.
 
 Returns a **nested** dict: each loaded modality owns a sub-dict with clean
 unprefixed keys::
@@ -65,7 +65,7 @@ class JAXTPCDataset(DefaultDataset):
     modalities : tuple[str]
         Any subset of ``'seg'``, ``'sensor'``, ``'inst'``, ``'labl'``.
         ``('labl',)`` and ``('sensor', 'labl')`` are invalid (see
-        ``docs/DATASET_DESIGN.md#invalid-combinations``).
+        README §Modality combinations).
     dataset_name : str
         File prefix (e.g., ``'sim'`` for ``sim_seg_0000.h5``).
     volume : int or None
@@ -180,13 +180,13 @@ class JAXTPCDataset(DefaultDataset):
                 "Invalid modality combination ('labl',): labl is a "
                 "dimension table and requires an instance-bearing modality "
                 "('seg' or 'inst') to join against. "
-                "See docs/DATASET_DESIGN.md#invalid-combinations.")
+                "See README §Modality combinations.")
         if mods == {'sensor', 'labl'}:
             raise ValueError(
                 "Invalid modality combination ('sensor', 'labl'): sensor has "
                 "no instance separation, so labl cannot be attached. Add "
                 "'inst' or 'seg' to the modalities tuple. "
-                "See docs/DATASET_DESIGN.md#invalid-combinations.")
+                "See README §Modality combinations.")
 
     def _modality_root(self, modality):
         mod_dir = os.path.join(self._source_data_root, modality)
