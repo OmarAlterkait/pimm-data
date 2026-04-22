@@ -69,7 +69,7 @@ Each modality produces a sub-dict at a top-level key of the same name.
 | Modality | Contains | Point-cloud dim |
 |---|---|---|
 | `seg`    | 3D truth deposits (one row per Geant4 step) | 3D |
-| `sensor` | Raw sparse detector response (pixels / PMT hits) | 2D (JAXTPC), 3D (LUCiD) |
+| `sensor` | Raw sparse detector response (pixels / PMT hits) | 2D (JAXTPC wire), 3D (JAXTPC pixel, LUCiD) |
 | `inst`   | Per-instance decomposition of `sensor` (same pixels/PMTs split by source particle) | same as `sensor` |
 | `labl`   | Dimension tables: `per_event`, `per_particle`, `per_track` (JAXTPC: `v{N}` per volume) | — |
 
@@ -157,9 +157,18 @@ data['labl'] = {
 
 ### JAXTPC sub-dicts
 
-JAXTPC is 2D (wire × time) and volume-partitioned. `sensor` and `inst`
-are point clouds merged across planes, with per-plane raw arrays kept
-in a nested `raw` dict for transforms that need them.
+JAXTPC is volume-partitioned with two readout types:
+
+- **wire** (U/V/Y planes, 2D `wire × time` per plane)
+- **pixel** (single `Pixel` plane per volume, 3D `py × pz × time`)
+
+`sensor` and `inst` are point clouds merged across planes, with per-plane
+raw arrays kept in a nested `raw` dict for transforms that need them.
+The readout type is auto-detected from the HDF5 `/config.readout_type`
+attribute and surfaced as `data['sensor']['readout_type']` /
+`data['inst']['readout_type']` (both always equal). `coord` shape,
+`planes` labels, and `raw` per-plane column names all follow the readout
+type — see below.
 
 ```python
 data['seg'] = {
@@ -175,23 +184,28 @@ data['seg'] = {
 }
 
 data['sensor'] = {
-    'coord':    (M, 2),        # (wire, time) merged across planes
-    'energy':   (M, 1),
-    'plane_id': (M, 1),
-    'planes':   [str, ...],    # plane labels in plane_id order
-    'raw': {plane_label: {'wire': ..., 'time': ..., 'value': ...}},
+    'coord':         (M, D),        # D=2 for wire (wire,time), D=3 for pixel (py,pz,time)
+    'energy':        (M, 1),
+    'plane_id':      (M, 1),
+    'planes':        [str, ...],    # plane labels in plane_id order
+                                    #   wire:  'volume_{v}_{U|V|Y}'
+                                    #   pixel: 'volume_{v}_Pixel'
+    'readout_type':  'wire' | 'pixel',
+    'raw': {plane_label: {...}},    # wire:  {'wire', 'time', 'value'}
+                                    # pixel: {'py', 'pz', 'time', 'value'}
 }
 
 data['inst'] = {
-    'coord':    (E, 2),
-    'energy':   (E, 1),
-    'plane_id': (E, 1),
-    'planes':   [str, ...],
-    'raw': {plane_label: {'wire': ..., 'time': ..., 'group_id': ...,
-                          'charge': ...}},
-    'instance': (E,),          # = group_id
+    'coord':         (E, D),        # D=2 for wire, D=3 for pixel
+    'energy':        (E, 1),
+    'plane_id':      (E, 1),
+    'planes':        [str, ...],
+    'readout_type':  'wire' | 'pixel',
+    'raw': {plane_label: {...}},    # wire:  {'wire', 'time', 'group_id', 'charge'}
+                                    # pixel: {'py', 'pz', 'time', 'group_id', 'charge'}
+    'instance': (E,),               # = group_id
     # present only when 'labl' is also in modalities:
-    'segment':  (E,),          # = track_{label_key}, joined via group_to_track
+    'segment':  (E,),               # = track_{label_key}, joined via group_to_track
 }
 
 data['labl'] = {              # keyed by volume

@@ -16,10 +16,13 @@ unprefixed keys::
 
     {
       'seg':    {'coord': (N,3), 'energy': (N,1), 'volume_id': ..., ...},
-      'sensor': {'coord': (M,2), 'energy': (M,1), 'plane_id': ...,
-                 'raw': {plane_label: {'wire', 'time', 'value'}}},
-      'inst':   {'coord': (E,2), 'energy': (E,1), 'instance': ..., ...,
-                 'raw': {plane_label: {'wire', 'time', 'group_id', 'charge'}}},
+      'sensor': {'coord': (M,D), 'energy': (M,1), 'plane_id': ...,
+                 'readout_type': 'wire'|'pixel',
+                 'raw': {plane_label: {'wire'|'py'+'pz', 'time', 'value'}}},
+      'inst':   {'coord': (E,D), 'energy': (E,1), 'instance': ..., ...,
+                 'readout_type': 'wire'|'pixel',
+                 'raw': {plane_label: {'wire'|'py'+'pz', 'time',
+                                       'group_id', 'charge'}}},
       'labl':   {'v0': {'track_ids': (T,), 'track_pdg': (T,),
                         'segment_to_track': (N_v,), ...}, 'v1': {...}},
       'bridges':{'group_to_track_v0': (G,), 'segment_to_group_v0': (N_v,),
@@ -126,21 +129,19 @@ class JAXTPCDataset(DefaultDataset):
         self.labl_reader = None
         self.inst_reader = None
 
-        planes = 'all'
-        if volume is not None:
-            planes = [f'volume_{volume}_U', f'volume_{volume}_V',
-                      f'volume_{volume}_Y']
-
         if 'seg' in self._modalities:
             self.seg_reader = JAXTPCSegReader(
                 data_root=self._modality_root('seg'), split=split,
                 dataset_name=dataset_name, min_deposits=min_deposits,
                 include_physics=include_physics, volume=volume)
 
+        # sensor/inst readout auto-detection. Build the readers unfiltered
+        # first so they can detect readout_type, then apply the volume
+        # plane filter using the correct plane labels for this readout.
         if 'sensor' in self._modalities:
             self.sensor_reader = JAXTPCSensorReader(
                 data_root=self._modality_root('sensor'), split=split,
-                dataset_name=dataset_name, planes=planes)
+                dataset_name=dataset_name, planes='all')
 
         if 'labl' in self._modalities:
             self.labl_reader = JAXTPCLablReader(
@@ -150,7 +151,26 @@ class JAXTPCDataset(DefaultDataset):
         if 'inst' in self._modalities:
             self.inst_reader = JAXTPCInstReader(
                 data_root=self._modality_root('inst'), split=split,
-                dataset_name=dataset_name, planes=planes)
+                dataset_name=dataset_name, planes='all')
+
+        # Resolve readout_type once from whichever reader can tell us.
+        self._readout_type = 'wire'
+        for r in (self.sensor_reader, self.inst_reader):
+            if r is not None:
+                self._readout_type = r.readout_type
+                break
+
+        # Now that readout_type is known, apply per-volume plane filter.
+        if volume is not None:
+            if self._readout_type == 'pixel':
+                planes = [f'volume_{volume}_Pixel']
+            else:
+                planes = [f'volume_{volume}_U', f'volume_{volume}_V',
+                          f'volume_{volume}_Y']
+            if self.sensor_reader is not None:
+                self.sensor_reader.planes = planes
+            if self.inst_reader is not None:
+                self.inst_reader.planes = planes
 
         active_readers = [r for r in (self.seg_reader, self.sensor_reader,
                                        self.labl_reader, self.inst_reader)
@@ -164,6 +184,15 @@ class JAXTPCDataset(DefaultDataset):
             transform=transform, test_mode=test_mode, test_cfg=test_cfg,
             cache=cache, ignore_index=ignore_index, loop=loop,
         )
+
+        # Fail fast on empty data_list — otherwise get_data() crashes later
+        # with an opaque ZeroDivisionError on `idx % len(self.data_list)`.
+        if len(self.data_list) == 0:
+            raise ValueError(
+                f"JAXTPCDataset(data_root={data_root!r}) yielded 0 events "
+                f"after filters (min_deposits={min_deposits}, "
+                f"max_len={max_len}). Lower min_deposits or verify the "
+                f"dataset has events meeting it.")
 
     @staticmethod
     def _validate_modalities(modalities):
@@ -258,23 +287,27 @@ class JAXTPCDataset(DefaultDataset):
         return sub
 
     def _build_sensor_cloud(self, sensor_raw):
-        """Merge per-plane sensor raw into a 2D point cloud + raw passthrough."""
+        """Merge per-plane sensor raw into a point cloud + raw passthrough."""
+        coord_keys = self._coord_keys()
         planes, coord, energy, plane_id, raw = self._merge_plane_dotted(
-            sensor_raw, prefix='sensor', value_key='value')
+            sensor_raw, prefix='sensor', value_key='value',
+            coord_keys=coord_keys)
         return {
             'coord': coord, 'energy': energy, 'plane_id': plane_id,
             'planes': planes, 'raw': raw,
+            'readout_type': self._readout_type,
         }
 
     def _build_inst_cloud(self, inst_raw, labl_by_volume):
-        """Merge per-plane inst raw into a 2D point cloud + raw passthrough.
+        """Merge per-plane inst raw into a point cloud + raw passthrough.
 
         Attaches ``segment`` when labl available (via group_to_track chain).
         ``instance`` is always attached (== group_id).
         """
+        coord_keys = self._coord_keys()
         planes, coord, energy, plane_id, raw = self._merge_plane_dotted(
             inst_raw, prefix='inst', value_key='charge',
-            extra_keys=('group_id',))
+            coord_keys=coord_keys, extra_keys=('group_id',))
         # instance = per-entry group_id
         instance = np.concatenate(
             [raw[p]['group_id'] for p in planes], axis=0
@@ -283,11 +316,18 @@ class JAXTPCDataset(DefaultDataset):
         sub = {
             'coord': coord, 'energy': energy, 'plane_id': plane_id,
             'instance': instance, 'planes': planes, 'raw': raw,
+            'readout_type': self._readout_type,
         }
         if labl_by_volume:
             sub['segment'] = self._decorate_inst_from_labl(
                 planes, raw, inst_raw, labl_by_volume)
         return sub
+
+    def _coord_keys(self):
+        """Per-plane column names that build the sensor/inst coord vector."""
+        if self._readout_type == 'pixel':
+            return ('py', 'pz', 'time')
+        return ('wire', 'time')
 
     def _build_labl(self, labl_flat):
         """Convert flat labl_v{N}_col keys into nested {v{N}: {col: arr}}."""
@@ -320,27 +360,37 @@ class JAXTPCDataset(DefaultDataset):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _merge_plane_dotted(raw_dict, prefix, value_key, extra_keys=()):
+    def _merge_plane_dotted(raw_dict, prefix, value_key, coord_keys,
+                            extra_keys=()):
         """Merge `{prefix}.{plane}.{col}` flat keys into a single point cloud.
 
+        ``coord_keys`` is the ordered tuple of per-plane column names that
+        form the coord vector (e.g. ``('wire', 'time')`` for wire readout,
+        ``('py', 'pz', 'time')`` for pixel). Coord shape is ``(M, len(coord_keys))``.
+
         Returns (planes, coord, energy, plane_id, raw_nested).
-        raw_nested is ``{plane_label: {'wire', 'time', value_key, *extra_keys}}``.
+        raw_nested is ``{plane_label: {*coord_keys, value_key, *extra_keys}}``.
         """
+        coord_dim = len(coord_keys)
+        # Discover planes by scanning for any coord-key suffix (they all
+        # share the same plane set, so the first key is enough).
+        first_key = coord_keys[0]
         planes = sorted(set(
             k.split('.')[1] for k in raw_dict
-            if k.startswith(prefix + '.') and k.endswith('.wire')
+            if k.startswith(prefix + '.') and k.endswith('.' + first_key)
         ))
         all_coord, all_val, all_plane_id = [], [], []
         raw_nested = {}
         for i, plane in enumerate(planes):
-            wire = raw_dict[f'{prefix}.{plane}.wire']
-            time = raw_dict[f'{prefix}.{plane}.time']
+            cols_arrays = [raw_dict[f'{prefix}.{plane}.{ck}']
+                           for ck in coord_keys]
             value = raw_dict[f'{prefix}.{plane}.{value_key}']
-            n = len(wire)
-            all_coord.append(np.stack([wire, time], axis=1).astype(np.float32))
+            n = len(cols_arrays[0])
+            all_coord.append(np.stack(cols_arrays, axis=1).astype(np.float32))
             all_val.append(value[:, None].astype(np.float32))
             all_plane_id.append(np.full((n, 1), i, dtype=np.int32))
-            cols = {'wire': wire, 'time': time, value_key: value}
+            cols = {ck: arr for ck, arr in zip(coord_keys, cols_arrays)}
+            cols[value_key] = value
             for ek in extra_keys:
                 cols[ek] = raw_dict[f'{prefix}.{plane}.{ek}']
             raw_nested[plane] = cols
@@ -350,7 +400,7 @@ class JAXTPCDataset(DefaultDataset):
             energy = np.concatenate(all_val, axis=0)
             plane_id = np.concatenate(all_plane_id, axis=0)
         else:
-            coord = np.zeros((0, 2), dtype=np.float32)
+            coord = np.zeros((0, coord_dim), dtype=np.float32)
             energy = np.zeros((0, 1), dtype=np.float32)
             plane_id = np.zeros((0, 1), dtype=np.int32)
 

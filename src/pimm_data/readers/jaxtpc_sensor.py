@@ -1,9 +1,12 @@
 """
-JAXTPCSensorReader — reads sparse raw sensor (wire) signals from JAXTPC
-``sensor/`` files.
+JAXTPCSensorReader — reads sparse raw sensor signals from JAXTPC
+``sensor/`` files. Supports both wire and pixel readouts.
 
-Decodes delta-encoded (wire, time, value) triples per plane.
-Output keys are dot-namespaced: sensor.{plane_label}.wire/time/value
+Readout type is auto-detected from ``/config.readout_type`` and exposed
+as ``reader.readout_type`` (``'wire'`` or ``'pixel'``). Output schema:
+
+- wire:  ``sensor.{plane_label}.{wire, time, value}``
+- pixel: ``sensor.{plane_label}.{py, pz, time, value}``
 
 Handles both old format (planes directly under event) and new format
 (planes under volume_N/ subgroups).
@@ -51,6 +54,7 @@ class JAXTPCSensorReader:
         self._h5data = []
 
         self._build_index()
+        self.readout_type = self._detect_readout_type()
 
     def _find_files(self):
         """Locate sensor shard files."""
@@ -99,6 +103,52 @@ class JAXTPCSensorReader:
         f = self._h5data[file_idx]
         return f, event_key
 
+    def _detect_readout_type(self):
+        """Return 'pixel' or 'wire' based on the first file's config attr.
+
+        Falls back to inspecting plane datasets if the attr is absent
+        (older files written before the attr was added).
+        """
+        for path in self.h5_files:
+            try:
+                with h5py.File(path, 'r', libver='latest', swmr=True) as f:
+                    if 'config' in f and 'readout_type' in f['config'].attrs:
+                        rt = str(f['config'].attrs['readout_type'])
+                        if rt in ('wire', 'pixel'):
+                            return rt
+                    for ek in f:
+                        if not ek.startswith('event_'):
+                            continue
+                        evt = f[ek]
+                        for vk in evt:
+                            vol = evt[vk]
+                            if not isinstance(vol, h5py.Group):
+                                continue
+                            if vk.startswith('volume_'):
+                                for pk in vol:
+                                    pg = vol[pk]
+                                    if not isinstance(pg, h5py.Group):
+                                        continue
+                                    if 'delta_py' in pg:
+                                        return 'pixel'
+                                    if 'delta_wire' in pg:
+                                        return 'wire'
+                            elif 'delta_py' in vol:
+                                return 'pixel'
+                            elif 'delta_wire' in vol:
+                                return 'wire'
+                        break
+            except Exception as e:
+                log.warning("readout detection failed on %s: %s", path, e)
+                continue
+        return 'wire'
+
+    def _plane_has_payload(self, g):
+        """True if this group contains a plane's sparse data payload."""
+        if self.readout_type == 'pixel':
+            return 'delta_py' in g
+        return 'delta_wire' in g
+
     def _iter_planes(self, evt):
         """Yield (plane_label, h5py.Group) for each plane in an event.
 
@@ -114,35 +164,50 @@ class JAXTPCSensorReader:
                 vol_label = key
                 for plane_key in obj:
                     pg = obj[plane_key]
-                    if isinstance(pg, h5py.Group) and 'delta_wire' in pg:
+                    if isinstance(pg, h5py.Group) and self._plane_has_payload(pg):
                         yield f'{vol_label}_{plane_key}', pg
-            elif 'delta_wire' in obj:
+            elif self._plane_has_payload(obj):
                 yield key, obj
 
-    def _decode_plane(self, g):
-        """Decode one plane's delta-encoded sparse data."""
+    def _decode_plane_wire(self, g):
+        """Decode one wire plane's delta-encoded sparse data."""
         wire_start = int(g.attrs['wire_start'])
         time_start = int(g.attrs['time_start'])
 
         wire = wire_start + np.cumsum(g['delta_wire'][:]).astype(np.int32)
         time = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
 
+        values = self._decode_values(g)
+        return wire, time, values
+
+    def _decode_plane_pixel(self, g):
+        """Decode one pixel plane's delta-encoded sparse data."""
+        py_start = int(g.attrs['py_start'])
+        pz_start = int(g.attrs['pz_start'])
+        time_start = int(g.attrs['time_start'])
+
+        py = py_start + np.cumsum(g['delta_py'][:]).astype(np.int32)
+        pz = pz_start + np.cumsum(g['delta_pz'][:]).astype(np.int32)
+        time = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
+
+        values = self._decode_values(g)
+        return py, pz, time, values
+
+    def _decode_values(self, g):
+        """Shared value decoding (handles uint16 digitization)."""
         raw_values = g['values'][:]
         if self.decode_digitization and raw_values.dtype == np.uint16:
             ped = int(g.attrs.get('pedestal', 0))
-            values = raw_values.astype(np.float32) - ped
-        else:
-            values = raw_values.astype(np.float32)
-
-        return wire, time, values
+            return raw_values.astype(np.float32) - ped
+        return raw_values.astype(np.float32)
 
     def read_event(self, idx):
         """Read one event, return dict with plane-namespaced sparse arrays.
 
-        Returns keys like:
-            sensor.east_U.wire:  (M,) int32
-            sensor.east_U.time:  (M,) int32
-            sensor.east_U.value: (M,) float32
+        Wire returns keys like:
+            sensor.{plane}.{wire, time, value}
+        Pixel returns keys like:
+            sensor.{plane}.{py, pz, time, value}
         """
         if not self._initted:
             self.h5py_worker_init()
@@ -155,11 +220,18 @@ class JAXTPCSensorReader:
             if self.planes != 'all' and plane_label not in self.planes:
                 continue
 
-            wire, time, values = self._decode_plane(pg)
             prefix = f'sensor.{plane_label}'
-            data_dict[f'{prefix}.wire'] = wire
-            data_dict[f'{prefix}.time'] = time
-            data_dict[f'{prefix}.value'] = values
+            if self.readout_type == 'pixel':
+                py, pz, time, values = self._decode_plane_pixel(pg)
+                data_dict[f'{prefix}.py'] = py
+                data_dict[f'{prefix}.pz'] = pz
+                data_dict[f'{prefix}.time'] = time
+                data_dict[f'{prefix}.value'] = values
+            else:
+                wire, time, values = self._decode_plane_wire(pg)
+                data_dict[f'{prefix}.wire'] = wire
+                data_dict[f'{prefix}.time'] = time
+                data_dict[f'{prefix}.value'] = values
 
         return data_dict
 

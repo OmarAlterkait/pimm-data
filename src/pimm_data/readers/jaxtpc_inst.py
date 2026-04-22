@@ -1,11 +1,16 @@
 """
 JAXTPCInstReader — reads per-instance sensor decomposition from JAXTPC
-``inst/`` files.
+``inst/`` files. Supports both wire and pixel readouts.
 
-Decodes CSR-encoded per-plane correspondence into flat arrays:
-per pixel entry: (wire, time, group_id, charge).
+Readout type is auto-detected from ``/config.readout_type`` and exposed
+as ``reader.readout_type``. Decoding of CSR-encoded per-plane
+correspondence yields:
 
-Also loads per-volume group_to_track lookup tables.
+- wire:  ``inst.{plane}.{wire, time, group_id, charge}``
+- pixel: ``inst.{plane}.{py, pz, time, group_id, charge}``
+
+Also loads per-volume ``group_to_track``, ``segment_to_group``, and
+``qs_fractions`` lookup tables (same shape for both readouts).
 
 All decoding is fully vectorized (no Python loops over groups).
 """
@@ -49,6 +54,7 @@ class JAXTPCInstReader:
         self._h5data = []
 
         self._build_index()
+        self.readout_type = self._detect_readout_type()
 
     def _find_files(self):
         """Locate inst shard files."""
@@ -97,9 +103,43 @@ class JAXTPCInstReader:
         f = self._h5data[file_idx]
         return f, event_key
 
+    def _detect_readout_type(self):
+        """Return 'pixel' or 'wire' based on the first file's config attr.
+
+        Falls back to inspecting plane datasets if the attr is absent.
+        """
+        for path in self.h5_files:
+            try:
+                with h5py.File(path, 'r', libver='latest', swmr=True) as f:
+                    if 'config' in f and 'readout_type' in f['config'].attrs:
+                        rt = str(f['config'].attrs['readout_type'])
+                        if rt in ('wire', 'pixel'):
+                            return rt
+                    for ek in f:
+                        if not ek.startswith('event_'):
+                            continue
+                        evt = f[ek]
+                        for vk in evt:
+                            vol = evt[vk]
+                            if not isinstance(vol, h5py.Group) or not vk.startswith('volume_'):
+                                continue
+                            for pk in vol:
+                                pg = vol[pk]
+                                if not isinstance(pg, h5py.Group):
+                                    continue
+                                if 'center_py' in pg or 'delta_py' in pg:
+                                    return 'pixel'
+                                if 'center_wires' in pg or 'delta_wires' in pg:
+                                    return 'wire'
+                        break
+            except Exception as e:
+                log.warning("readout detection failed on %s: %s", path, e)
+                continue
+        return 'wire'
+
     @staticmethod
-    def _decode_plane_vectorized(g):
-        """Decode one plane's CSR correspondence — fully vectorized.
+    def _decode_plane_wire(g):
+        """Decode one wire plane's CSR correspondence — fully vectorized.
 
         Returns (wire, time, group_id, charge) arrays, all shape (E,).
         """
@@ -127,15 +167,50 @@ class JAXTPCInstReader:
 
         return wires, times, gids, charges
 
+    @staticmethod
+    def _decode_plane_pixel(g):
+        """Decode one pixel plane's CSR correspondence — fully vectorized.
+
+        Returns (py, pz, time, group_id, charge) arrays, all shape (E,).
+        """
+        group_ids = g['group_ids'][:]
+        group_sizes = g['group_sizes'][:].astype(np.int32)
+        center_py = g['center_py'][:]
+        center_pz = g['center_pz'][:]
+        center_times = g['center_times'][:]
+        peak_charges = g['peak_charges'][:]
+        delta_py = g['delta_py'][:]
+        delta_pz = g['delta_pz'][:]
+        delta_times = g['delta_times'][:]
+        charges_u16 = g['charges_u16'][:]
+
+        G = len(group_ids)
+        if G == 0:
+            empty = np.array([], dtype=np.int32)
+            return empty, empty, empty, empty, np.array([], dtype=np.float32)
+
+        py = (np.repeat(center_py, group_sizes).astype(np.int32)
+              + delta_py.astype(np.int32))
+        pz = (np.repeat(center_pz, group_sizes).astype(np.int32)
+              + delta_pz.astype(np.int32))
+        times = (np.repeat(center_times, group_sizes).astype(np.int32)
+                 + delta_times.astype(np.int32))
+        gids = np.repeat(group_ids, group_sizes)
+        charges = (np.repeat(peak_charges, group_sizes)
+                   * charges_u16.astype(np.float32) / 65535.0)
+
+        return py, pz, times, gids, charges
+
     def read_event(self, idx):
         """Read one event's per-instance sensor decomposition.
 
-        Returns dict with:
-            inst.{vol_plane}.wire:     (E,) int32  — wire index per entry
-            inst.{vol_plane}.time:     (E,) int32  — time index per entry
-            inst.{vol_plane}.group_id: (E,) int32  — group ID per entry
-            inst.{vol_plane}.charge:   (E,) float32 — charge per entry
-            g2t_v{N}:                  (G,) int32  — group_to_track per volume
+        Wire returns:
+            inst.{vol_plane}.{wire, time, group_id, charge}
+        Pixel returns:
+            inst.{vol_plane}.{py, pz, time, group_id, charge}
+
+        Plus (both readouts):
+            group_to_track_v{N}, segment_to_group_v{N}, qs_fractions_v{N}
         """
         if not self._initted:
             self.h5py_worker_init()
@@ -175,13 +250,20 @@ class JAXTPCInstReader:
                 if self.planes != 'all' and plane_label not in self.planes:
                     continue
 
-                wires, times, gids, charges = self._decode_plane_vectorized(pg)
-
                 prefix = f'inst.{plane_label}'
-                data_dict[f'{prefix}.wire'] = wires
-                data_dict[f'{prefix}.time'] = times
-                data_dict[f'{prefix}.group_id'] = gids
-                data_dict[f'{prefix}.charge'] = charges
+                if self.readout_type == 'pixel':
+                    py, pz, times, gids, charges = self._decode_plane_pixel(pg)
+                    data_dict[f'{prefix}.py'] = py
+                    data_dict[f'{prefix}.pz'] = pz
+                    data_dict[f'{prefix}.time'] = times
+                    data_dict[f'{prefix}.group_id'] = gids
+                    data_dict[f'{prefix}.charge'] = charges
+                else:
+                    wires, times, gids, charges = self._decode_plane_wire(pg)
+                    data_dict[f'{prefix}.wire'] = wires
+                    data_dict[f'{prefix}.time'] = times
+                    data_dict[f'{prefix}.group_id'] = gids
+                    data_dict[f'{prefix}.charge'] = charges
 
         return data_dict
 

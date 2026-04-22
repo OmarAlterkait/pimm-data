@@ -54,11 +54,15 @@ _JAXTPC_POS_ORIGIN = (-2160.0, -2160.0, -2160.0)
 
 def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
                        n_volumes=2, n_deposits=60, n_groups=6, n_tracks=6,
-                       n_pixels_per_plane=40, seed=0):
+                       n_pixels_per_plane=40, readout_type='wire', seed=0):
     """Write a minimal schema-conformant JAXTPC v3 dataset.
 
     Creates ``{outdir}/{seg,sensor,inst,labl}/{dataset_name}_{mod}_NNNN.h5``.
+
+    ``readout_type`` is ``'wire'`` (three U/V/Y planes per volume) or
+    ``'pixel'`` (single ``Pixel`` plane per volume; coord adds a pz axis).
     """
+    assert readout_type in ('wire', 'pixel'), readout_type
     os.makedirs(outdir, exist_ok=True)
     for mod in ('seg', 'sensor', 'inst', 'labl'):
         os.makedirs(os.path.join(outdir, mod), exist_ok=True)
@@ -68,16 +72,18 @@ def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
     for file_idx in range(n_files):
         events = [
             _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups,
-                                n_tracks, n_pixels_per_plane)
+                                n_tracks, n_pixels_per_plane, readout_type)
             for _ in range(n_events)
         ]
         tag = f'{dataset_name}_{{mod}}_{file_idx:04d}.h5'
         _write_jaxtpc_seg(os.path.join(outdir, 'seg',
                                        tag.format(mod='seg')), events)
         _write_jaxtpc_sensor(os.path.join(outdir, 'sensor',
-                                          tag.format(mod='sensor')), events)
+                                          tag.format(mod='sensor')), events,
+                             readout_type)
         _write_jaxtpc_inst(os.path.join(outdir, 'inst',
-                                        tag.format(mod='inst')), events)
+                                        tag.format(mod='inst')), events,
+                           readout_type)
         _write_jaxtpc_labl(os.path.join(outdir, 'labl',
                                         tag.format(mod='labl')), events)
 
@@ -85,8 +91,9 @@ def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
 
 
 def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
-                        n_pixels_per_plane):
+                        n_pixels_per_plane, readout_type='wire'):
     """Draw a coherent set of volumes with consistent FKs."""
+    plane_names = ('Pixel',) if readout_type == 'pixel' else _JAXTPC_PLANES
     volumes = []
     for v in range(n_volumes):
         track_ids = np.sort(rng.choice(
@@ -121,9 +128,9 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
             np.float32)
 
         planes = {}
-        for plane in _JAXTPC_PLANES:
+        for plane in plane_names:
             planes[plane] = _build_jaxtpc_plane(
-                rng, n_groups, n_pixels_per_plane)
+                rng, n_groups, n_pixels_per_plane, readout_type)
 
         volumes.append(dict(
             vol_idx=v,
@@ -140,8 +147,12 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
     return volumes
 
 
-def _build_jaxtpc_plane(rng, n_groups, n_pixels_per_plane):
-    """One plane: CSR-packed per-group pixel entries + delta-encoded sparse."""
+def _build_jaxtpc_plane(rng, n_groups, n_pixels_per_plane, readout_type='wire'):
+    """One plane: CSR-packed per-group pixel entries + delta-encoded sparse.
+
+    For pixel readout, coord adds a second spatial axis (py/pz) in both
+    the CSR centers/deltas and the sensor sparse stream.
+    """
     # CSR: split n_pixels across n_groups with random but ≥1 group_size,
     # capped at uint8 max.
     base = np.ones(n_groups, dtype=np.int32)
@@ -157,40 +168,56 @@ def _build_jaxtpc_plane(rng, n_groups, n_pixels_per_plane):
     total = int(group_sizes.sum())
 
     group_ids = np.arange(n_groups, dtype=np.int32)
-    center_wires = rng.integers(10, 500, size=n_groups).astype(np.int16)
     center_times = rng.integers(50, 2000, size=n_groups).astype(np.int16)
     peak_charges = rng.uniform(1e3, 5e4, size=n_groups).astype(np.float32)
-    delta_wires = rng.integers(-3, 4, size=total).astype(np.int8)
     delta_times = rng.integers(-5, 6, size=total).astype(np.int8)
     charges_u16 = rng.integers(1, 65535, size=total, dtype=np.uint16)
 
     # Delta-encoded sparse for the sensor file. Strictly ordered so
-    # cumsum reconstructs a monotone wire/time stream. Made longer than
-    # the inst CSR total so sensor != inst, mirroring electronics shaping
-    # which spreads each inst pixel across many sensor ticks.
+    # cumsum reconstructs a monotone stream. Made longer than the inst
+    # CSR total so sensor != inst, mirroring electronics shaping which
+    # spreads each inst pixel across many sensor ticks.
     n_sparse = max(total * 3 + 1, 2)
-    delta_wire = np.concatenate([
-        np.array([0], dtype=np.int16),
-        rng.integers(0, 4, size=n_sparse - 1, dtype=np.int16),
-    ])
     delta_time = np.concatenate([
         np.array([0], dtype=np.int16),
         rng.integers(0, 6, size=n_sparse - 1, dtype=np.int16),
     ])
     values = rng.integers(100, 4000, size=n_sparse, dtype=np.uint16)
 
-    return dict(
+    out = dict(
         group_ids=group_ids, group_sizes=group_sizes,
-        center_wires=center_wires, center_times=center_times,
-        peak_charges=peak_charges,
-        delta_wires=delta_wires, delta_times=delta_times,
-        charges_u16=charges_u16,
-        # Sensor sparse stream:
-        delta_wire=delta_wire, delta_time=delta_time, values=values,
-        wire_start=int(rng.integers(0, 100)),
+        center_times=center_times, peak_charges=peak_charges,
+        delta_times=delta_times, charges_u16=charges_u16,
+        delta_time=delta_time, values=values,
         time_start=int(rng.integers(0, 100)),
         pedestal=0,
     )
+
+    if readout_type == 'pixel':
+        out['center_py'] = rng.integers(10, 200, size=n_groups).astype(np.int16)
+        out['center_pz'] = rng.integers(10, 200, size=n_groups).astype(np.int16)
+        out['delta_py'] = rng.integers(-2, 3, size=total).astype(np.int8)
+        out['delta_pz'] = rng.integers(-2, 3, size=total).astype(np.int8)
+        out['delta_py_sparse'] = np.concatenate([
+            np.array([0], dtype=np.int16),
+            rng.integers(0, 3, size=n_sparse - 1, dtype=np.int16),
+        ])
+        out['delta_pz_sparse'] = np.concatenate([
+            np.array([0], dtype=np.int16),
+            rng.integers(0, 3, size=n_sparse - 1, dtype=np.int16),
+        ])
+        out['py_start'] = int(rng.integers(0, 100))
+        out['pz_start'] = int(rng.integers(0, 100))
+    else:
+        out['center_wires'] = rng.integers(10, 500, size=n_groups).astype(np.int16)
+        out['delta_wires'] = rng.integers(-3, 4, size=total).astype(np.int8)
+        out['delta_wire'] = np.concatenate([
+            np.array([0], dtype=np.int16),
+            rng.integers(0, 4, size=n_sparse - 1, dtype=np.int16),
+        ])
+        out['wire_start'] = int(rng.integers(0, 100))
+
+    return out
 
 
 def _write_jaxtpc_seg(path, events):
@@ -214,28 +241,44 @@ def _write_jaxtpc_seg(path, events):
                     vg.create_dataset(k, data=v[k])
 
 
-def _write_jaxtpc_sensor(path, events):
+def _write_jaxtpc_sensor(path, events, readout_type='wire'):
     with h5py.File(path, 'w') as f:
         cfg = f.create_group('config')
         cfg.attrs['n_events'] = len(events)
+        cfg.attrs['readout_type'] = readout_type
         for i, volumes in enumerate(events):
             evt = f.create_group(f'event_{i:03d}')
             for v in volumes:
                 vg = evt.create_group(f'volume_{v["vol_idx"]}')
                 for plane_name, plane in v['planes'].items():
                     pg = vg.create_group(plane_name)
-                    pg.attrs['wire_start'] = plane['wire_start']
                     pg.attrs['time_start'] = plane['time_start']
                     pg.attrs['pedestal'] = plane['pedestal']
-                    pg.create_dataset('delta_wire', data=plane['delta_wire'])
                     pg.create_dataset('delta_time', data=plane['delta_time'])
                     pg.create_dataset('values', data=plane['values'])
+                    if readout_type == 'pixel':
+                        pg.attrs['py_start'] = plane['py_start']
+                        pg.attrs['pz_start'] = plane['pz_start']
+                        pg.create_dataset('delta_py',
+                                          data=plane['delta_py_sparse'])
+                        pg.create_dataset('delta_pz',
+                                          data=plane['delta_pz_sparse'])
+                    else:
+                        pg.attrs['wire_start'] = plane['wire_start']
+                        pg.create_dataset('delta_wire',
+                                          data=plane['delta_wire'])
 
 
-def _write_jaxtpc_inst(path, events):
+def _write_jaxtpc_inst(path, events, readout_type='wire'):
+    shared_keys = ('group_ids', 'group_sizes', 'center_times',
+                   'peak_charges', 'delta_times', 'charges_u16')
+    readout_keys = (('center_py', 'center_pz', 'delta_py', 'delta_pz')
+                    if readout_type == 'pixel'
+                    else ('center_wires', 'delta_wires'))
     with h5py.File(path, 'w') as f:
         cfg = f.create_group('config')
         cfg.attrs['n_events'] = len(events)
+        cfg.attrs['readout_type'] = readout_type
         for i, volumes in enumerate(events):
             evt = f.create_group(f'event_{i:03d}')
             for v in volumes:
@@ -246,10 +289,7 @@ def _write_jaxtpc_inst(path, events):
                 vg.create_dataset('qs_fractions', data=v['qs_fractions'])
                 for plane_name, plane in v['planes'].items():
                     pg = vg.create_group(plane_name)
-                    for key in ('group_ids', 'group_sizes',
-                                'center_wires', 'center_times',
-                                'peak_charges',
-                                'delta_wires', 'delta_times', 'charges_u16'):
+                    for key in shared_keys + readout_keys:
                         pg.create_dataset(key, data=plane[key])
 
 

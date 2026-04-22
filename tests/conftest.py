@@ -79,6 +79,21 @@ def jaxtpc_data_root(tmp_path_factory):
 
 
 @pytest.fixture(scope='session')
+def jaxtpc_pixel_data_root(tmp_path_factory):
+    """Pixel-readout JAXTPC dataset.
+
+    Prefers ``JAXTPC_PIXEL_DATA_ROOT`` when set; otherwise falls back
+    to a synthetic pixel fixture. Pixel-specific tests should request
+    this fixture instead of ``jaxtpc_data_root``.
+    """
+    from functools import partial
+    builder = partial(make_jaxtpc_sample, readout_type='pixel')
+    path, _ = _resolve_root('JAXTPC_PIXEL_DATA_ROOT', tmp_path_factory,
+                            builder, 'jaxtpc_pixel_synth')
+    return path
+
+
+@pytest.fixture(scope='session')
 def lucid_data_root(tmp_path_factory):
     path, _ = _resolve_root('LUCID_DATA_ROOT', tmp_path_factory,
                             make_lucid_sample, 'lucid_synth')
