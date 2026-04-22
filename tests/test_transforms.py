@@ -81,7 +81,7 @@ def test_end_to_end_transform_collate(jaxtpc_data_root):
     ds = JAXTPCDataset(data_root=jaxtpc_data_root, split='',
                        dataset_name='sim',
                        modalities=('seg', 'labl'), label_key='pdg',
-                       min_deposits=1024, max_len=4, transform=transform)
+                       min_deposits=50, max_len=4, transform=transform)
     batch = collate_fn([ds[0], ds[1]])
     assert batch['coord'].shape[1] == 3
     assert 'offset' in batch

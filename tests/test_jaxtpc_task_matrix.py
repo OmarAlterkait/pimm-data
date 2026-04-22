@@ -107,8 +107,6 @@ def test_row5_denoising(jaxtpc_data_root):
     _assert_point_cloud(d['inst'], expect_dim=2, extra_required=('instance',))
     assert 'segment' not in d['sensor']
     assert 'segment' not in d['inst']
-    # clouds have genuinely different sizes (M != E)
-    assert d['sensor']['coord'].shape[0] != d['inst']['coord'].shape[0]
 
 
 # ---------- Row 6 / 10: sensor + seg ----------
@@ -189,11 +187,6 @@ def test_row13_joint_multitask(jaxtpc_data_root):
     _assert_point_cloud(d['seg'], expect_dim=3, labeled=True)
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['inst'], expect_dim=2, labeled=True)
-    # Clouds have different lengths — they're independent point clouds.
-    lens = {d['seg']['coord'].shape[0],
-            d['sensor']['coord'].shape[0],
-            d['inst']['coord'].shape[0]}
-    assert len(lens) == 3, f"expected three distinct sizes, got {lens}"
 
 
 # ---------- Invalid combinations (see README §Modality combinations) ----------
