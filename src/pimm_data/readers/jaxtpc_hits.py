@@ -233,10 +233,9 @@ class JAXTPCHitsReader:
             if 'group_to_track' in vol:
                 data_dict[f'group_to_track_v{vol_idx}'] = \
                     vol['group_to_track'][:].astype(np.int32)
-            d2g_key = 'deposit_to_group' if 'deposit_to_group' in vol else 'segment_to_group'
-            if d2g_key in vol:
+            if 'deposit_to_group' in vol:
                 data_dict[f'deposit_to_group_v{vol_idx}'] = \
-                    vol[d2g_key][:].astype(np.int32)
+                    vol['deposit_to_group'][:].astype(np.int32)
             if 'qs_fractions' in vol:
                 data_dict[f'qs_fractions_v{vol_idx}'] = \
                     vol['qs_fractions'][:].astype(np.float32)
