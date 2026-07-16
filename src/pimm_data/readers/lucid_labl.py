@@ -88,7 +88,7 @@ _EVENT_KEYS = ('t0', 'contained')
 # (data+offsets, CSR-style like genealogy). interaction_idx in per_particle is
 # the one-hop FK from a point into this table.
 _INTERACTION_KEYS = (
-    'contained', 'n_particles', 'n_primaries',
+    'contained', 'interaction_channel', 'n_particles', 'n_primaries',
     'neutrino_energy_MeV', 'neutrino_pdg', 'source_type', 't0',
     'vertex_x', 'vertex_y', 'vertex_z',
     'primary_pdgs_data', 'primary_pdgs_offsets',
@@ -96,17 +96,26 @@ _INTERACTION_KEYS = (
     'primary_track_ids_data', 'primary_track_ids_offsets',
 )
 
+# per_window (per-trigger-window) scope — WAND fv5. One row per selected
+# trigger window; digit_offsets is the CSR boundary into the event's sensor
+# digit list, window_start/end are detector-frame ns.
+_WINDOW_KEYS = ('digit_offsets', 'window_start', 'window_end')
+
 _INT_KEYS = {'category', 'interaction_idx',
              'genealogy_data', 'genealogy_offsets',
              'ext_genealogy_data', 'ext_genealogy_offsets',
              'track_id', 'pdg', 'parent_id', 'particle_idx',
              'ancestor', 'interaction', 'n_cherenkov',
              # per_interaction integer columns (source_type uint8,
-             # neutrino_pdg int16, offsets uint32 in the v3 writer)
+             # neutrino_pdg int16, offsets uint32 in the v3 writer,
+             # interaction_channel int32 in the fv5 writer)
+             'interaction_channel',
              'n_particles', 'n_primaries', 'neutrino_pdg', 'source_type',
              'primary_pdgs_data', 'primary_pdgs_offsets',
              'primary_energies_offsets',
-             'primary_track_ids_data', 'primary_track_ids_offsets'}
+             'primary_track_ids_data', 'primary_track_ids_offsets',
+             # per_window integer columns
+             'digit_offsets'}
 
 
 class LUCiDLablReader(ShardReaderBase):
@@ -207,6 +216,12 @@ class LUCiDLablReader(ShardReaderBase):
             for k in _PARTICLE_KEYS:
                 if k in pp:
                     data[f'labl_particle_{k}'] = self._cast(pp[k][:], k)
+
+        pw = evt['per_window'] if 'per_window' in evt else None
+        if pw is not None:
+            for k in _WINDOW_KEYS:
+                if k in pw:
+                    data[f'labl_window_{k}'] = self._cast(pw[k][:], k)
 
         pt = evt['per_track'] if 'per_track' in evt else None
         if pt is not None:

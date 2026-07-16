@@ -508,7 +508,14 @@ def _build_lucid_event(rng, n_segments, n_hits, n_hits_entries,
     hits_particle_idx = rng.integers(0, n_particles,
                                      size=n_hits_entries).astype(np.int32)
     hits_pe = rng.uniform(0.05, 20.0, size=n_hits_entries).astype(np.float32)
-    hits_t = rng.uniform(0.0, 100.0, size=n_hits_entries).astype(np.float32)
+    # Real WAND (fv5) stores times as float64; keep the fixture dtype honest.
+    hits_t = rng.uniform(0.0, 100.0, size=n_hits_entries).astype(np.float64)
+    # fv5 columns: reconstructed (smeared) time, digitizer digit FK, and
+    # emission process (0=Cherenkov, 1=scintillation, 2=dark).
+    hits_t_reco = (hits_t + rng.normal(0.0, 1.0, size=n_hits_entries)).astype(
+        np.float64)
+    hits_digit_idx = np.arange(n_hits_entries, dtype=np.int32)
+    hits_emission = rng.integers(0, 2, size=n_hits_entries).astype(np.int8)
 
     # Per-interaction (per-neutrino-vertex), F5. Dtypes match the v3 writer
     # (neutrino_pdg int16, source_type uint8, ragged offsets uint32). One
@@ -517,6 +524,8 @@ def _build_lucid_event(rng, n_segments, n_hits, n_hits_entries,
                              size=(n_interactions, 3)).astype(np.float32)
     interaction_table = dict(
         contained=(rng.random(n_interactions) > 0.3).astype(bool),
+        # fv5: interaction channel code (-1 for non-neutrino sources)
+        interaction_channel=np.full(n_interactions, -1, dtype=np.int32),
         n_particles=rng.integers(1, n_particles + 1,
                                  size=n_interactions).astype(np.int32),
         n_primaries=np.ones(n_interactions, dtype=np.int32),
@@ -539,18 +548,29 @@ def _build_lucid_event(rng, n_segments, n_hits, n_hits_entries,
         primary_track_ids_offsets=np.arange(n_interactions + 1, dtype=np.uint32),
     )
 
+    # fv5: spatial segment-group ids + per-trigger-window table (one window
+    # covering all digits — matches single-vertex WAND events).
+    seg_group_id = rng.integers(0, 4, size=n_segments).astype(np.int32)
+    window_table = dict(
+        digit_offsets=np.array([0, n_hits], dtype=np.int32),
+        window_start=np.array([0.0], dtype=np.float64),
+        window_end=np.array([100.0], dtype=np.float64),
+    )
+
     return dict(
         step=dict(
             start=start, end=end, direction=direction, edep=edep,
             time=seg_time, track_idx=seg_track_idx, beta_start=beta_start,
             n_cherenkov=n_cherenkov_seg, contained=contained_seg,
+            group_id=seg_group_id,
         ),
         sensor=dict(
             sensor_idx=sensor_sensor_idx, PE=sensor_pe, T=sensor_t,
         ),
         hits=dict(
             sensor_idx=hits_sensor_idx, particle_idx=hits_particle_idx,
-            PE=hits_pe, T=hits_t,
+            PE=hits_pe, T=hits_t, T_reco=hits_t_reco,
+            digit_idx=hits_digit_idx, emission_process=hits_emission,
         ),
         labl=dict(
             t0=np.float32(rng.uniform(-1.0, 1.0)),
@@ -567,6 +587,7 @@ def _build_lucid_event(rng, n_segments, n_hits, n_hits_entries,
             n_cherenkov=n_cherenkov_track,
             n_particles=n_particles,
             per_interaction=interaction_table,
+            per_window=window_table,
         ),
     )
 
@@ -576,6 +597,11 @@ def _write_lucid_step(path, events):
         cfg = f.create_group('config')
         cfg.attrs['n_events'] = len(events)
         cfg.attrs['format_version'] = 5   # match real WAND (readers are version-agnostic)
+        # fv5 detector geometry (HK-like cylinder, meters)
+        cfg.attrs['detector_half_height'] = 32.96
+        cfg.attrs['detector_radius'] = 32.43
+        cfg.create_dataset('detector_axis',
+                           data=np.array([0.0, 0.0, 1.0], dtype=np.float32))
         for i, evt in enumerate(events):
             seg = evt['step']
             g = f.create_group(f'event_{i:03d}')
@@ -595,6 +621,7 @@ def _write_lucid_step(path, events):
             g.create_dataset('beta_start', data=seg['beta_start'])
             g.create_dataset('n_cherenkov', data=seg['n_cherenkov'])
             g.create_dataset('contained', data=seg['contained'])
+            g.create_dataset('group_id', data=seg['group_id'])
 
 
 def _write_lucid_sensor(path, events, pmt_positions):
@@ -626,6 +653,9 @@ def _write_lucid_hits(path, events, pmt_positions):
             g.create_dataset('particle_idx', data=s['particle_idx'])
             g.create_dataset('PE', data=s['PE'])
             g.create_dataset('T', data=s['T'])
+            g.create_dataset('T_reco', data=s['T_reco'])
+            g.create_dataset('digit_idx', data=s['digit_idx'])
+            g.create_dataset('emission_process', data=s['emission_process'])
 
 
 def _write_lucid_labl(path, events):
@@ -646,6 +676,10 @@ def _write_lucid_labl(path, events):
             pint = g.create_group('per_interaction')
             for k, arr in l['per_interaction'].items():
                 pint.create_dataset(k, data=arr)
+
+            pwin = g.create_group('per_window')
+            for k, arr in l['per_window'].items():
+                pwin.create_dataset(k, data=arr)
 
             pp = g.create_group('per_particle')
             pp.create_dataset('category', data=l['category'])
