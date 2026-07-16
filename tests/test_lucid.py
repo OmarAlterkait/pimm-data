@@ -493,3 +493,72 @@ def test_step_contained_per_segment(lucid_data_root):
     N = step['coord'].shape[0]
     assert step['contained'].shape == (N,)
     assert step['contained'].dtype == np.bool_
+
+
+# ---------------------------------------------------------------------------
+# WAND fv5 additions (T_reco / digit_idx / emission_process, per_window,
+# interaction_channel, group_id, detector geometry)
+# ---------------------------------------------------------------------------
+
+def test_wand_fv5_columns_surface(lucid_data_root):
+    """The fv5 columns surface through the dataset with the right shapes."""
+    ds = make_ds(lucid_data_root,
+                 modalities=('sensor', 'hits', 'step', 'labl'))
+    d = ds.get_data(0)
+
+    inst = d['hits']
+    n = inst['coord'].shape[0]
+    assert inst['time_reco'].shape == (n, 1)
+    assert inst['time_reco'].dtype == np.float32
+    assert inst['digit_idx'].shape == (n,)
+    assert inst['emission_process'].shape == (n,)
+    assert inst['emission_process'].dtype == np.int8
+
+    seg = d['step']
+    assert seg['group_id'].shape == (seg['coord'].shape[0],)
+    assert seg['group_id'].dtype == np.int32
+
+    labl = d['labl']
+    assert 'interaction_channel' in labl['interaction']
+    w = labl['window']
+    # CSR: one more offset boundary than windows
+    assert w['digit_offsets'].shape[0] == w['window_start'].shape[0] + 1
+    assert w['window_start'].shape == w['window_end'].shape
+
+
+def test_step_reader_detector_geometry(lucid_data_root):
+    """Step reader exposes the fv5 detector geometry from config/."""
+    ds = make_ds(lucid_data_root, modalities=('step',))
+    geom = ds.step_reader.detector_geometry
+    assert geom['half_height'] is not None
+    assert geom['radius'] is not None
+    assert geom['axis'].shape == (3,)
+
+
+def test_hits_pe_threshold_masks_fv5_columns(lucid_data_root):
+    """pe_threshold must mask the fv5 columns in lockstep with pe."""
+    ds = make_ds(lucid_data_root, modalities=('hits',), pe_threshold=5.0)
+    d = ds.get_data(0)
+    inst = d['hits']
+    n = inst['coord'].shape[0]
+    assert inst['time_reco'].shape[0] == n
+    assert inst['digit_idx'].shape[0] == n
+    assert inst['emission_process'].shape[0] == n
+    assert np.all(inst['energy'] > 5.0)
+
+
+def test_sensor_reader_detector_geometry_derived(lucid_data_root):
+    """Sensor reader derives geometry from the PMT position table when the
+    config carries no explicit attrs; the dataset property prefers step's
+    explicit attrs when the step modality is active."""
+    ds = make_ds(lucid_data_root, modalities=('sensor',))
+    geom = ds.detector_geometry
+    assert geom['half_height'] is not None
+    assert geom['radius'] is not None
+    assert geom['axis'].shape == (3,)
+
+    ds2 = make_ds(lucid_data_root, modalities=('sensor', 'step'))
+    geom2 = ds2.detector_geometry
+    # step fixture writes explicit HK-like attrs
+    assert abs(geom2['half_height'] - 32.96) < 1e-6
+    assert abs(geom2['radius'] - 32.43) < 1e-6
