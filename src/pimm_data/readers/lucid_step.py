@@ -14,11 +14,16 @@ Output dict:
     time        (N,1) float32
     track_idx   (N,)  int32     FK → labl.per_track
     contained   (N,)  bool      step start+end both inside detector volume
+    group_id    (N,)  int32     spatial segment-group id (when present)
 
     (include_physics=True adds:)
     direction   (N,3) float32   unit direction
     beta_start  (N,1) float32   initial beta (v/c) at segment start
     n_cherenkov (N,1) int32     number of Cherenkov photons produced
+
+The reader also exposes ``detector_geometry`` — a dict with ``half_height``,
+``radius`` (meters) and ``axis`` ((3,) float32), read from the first shard's
+``config/`` (WAND fv5; values are ``None`` when absent).
 """
 
 import numpy as np
@@ -54,6 +59,36 @@ class LUCiDStepReader(ShardReaderBase):
         self.min_segments = int(min_segments)
         self.include_physics = bool(include_physics)
         self._init_shards()
+        self.detector_geometry = self._read_detector_geometry()
+
+    def _read_detector_geometry(self):
+        """Detector geometry from the first shard's ``config/`` (WAND fv5):
+        ``detector_half_height`` / ``detector_radius`` attrs and the
+        ``detector_axis`` dataset. ``None`` values when absent."""
+        geom = dict(half_height=None, radius=None, axis=None)
+        for h5_path in self.h5_files:
+            # First shard that actually opens — a dangling shard (F17) is
+            # skipped here just like everywhere else. Geometry is per-file
+            # metadata shared across shards.
+            try:
+                f = h5py.File(h5_path, 'r', libver='latest', swmr=True)
+            except OSError:
+                continue
+            with f:
+                cfg = f.get('config')
+                if cfg is not None:
+                    if 'detector_half_height' in cfg.attrs:
+                        geom['half_height'] = float(
+                            cfg.attrs['detector_half_height'])
+                    if 'detector_radius' in cfg.attrs:
+                        geom['radius'] = float(cfg.attrs['detector_radius'])
+                    if 'detector_axis' in cfg:
+                        geom['axis'] = cfg['detector_axis'][:].astype(
+                            np.float32)
+            break
+        if geom['axis'] is None:
+            geom['axis'] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return geom
 
     def _index_for_shard(self, h5_path):
         """Present events, filtered by ``min_segments`` when set.
@@ -94,6 +129,8 @@ class LUCiDStepReader(ShardReaderBase):
         }
         if 'contained' in evt:
             data['contained'] = evt['contained'][:].astype(bool)
+        if 'group_id' in evt:
+            data['group_id'] = evt['group_id'][:].astype(np.int32)
 
         if self.include_physics:
             direction = np.stack([evt['dir_x'][:].astype(np.float32),

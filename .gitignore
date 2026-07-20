@@ -7,3 +7,4 @@ __pycache__/
 build/
 dist/
 tests/fixtures/*.h5
+.venv/

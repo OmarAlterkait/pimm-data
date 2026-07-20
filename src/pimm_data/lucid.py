@@ -1,6 +1,6 @@
 """
 LUCiDDataset — multimodal dataset for LUCiD Water Cherenkov simulation
-output (``format_version: 3``).
+output (``format_version: 3+``; WAND production is ``5``).
 
 Loads from co-indexed per-modality HDF5 shards:
 
@@ -262,6 +262,13 @@ class LUCiDDataset(ShardEventDataset):
             'particle_idx': particle_idx_arr,
             'instance': particle_idx_arr.astype(np.int32),
         }
+        # WAND fv5 columns (reader defaults them when absent).
+        if 't_reco' in raw:
+            sub['time_reco'] = raw['t_reco'][:, None].astype(np.float32)
+        if 'digit_idx' in raw:
+            sub['digit_idx'] = raw['digit_idx']
+        if 'emission_process' in raw:
+            sub['emission_process'] = raw['emission_process']
         if labl is not None:
             category = labl['particle'].get('category')
             if category is not None:
@@ -301,7 +308,8 @@ class LUCiDDataset(ShardEventDataset):
         """Rebuild nested ``{event, interaction, particle, track}`` dict from
         flat keys (the tables ``decorate_labels`` resolves ``source`` against).
         """
-        out = {'event': {}, 'interaction': {}, 'particle': {}, 'track': {}}
+        out = {'event': {}, 'interaction': {}, 'particle': {},
+               'track': {}, 'window': {}}
         for k, v in flat.items():
             if k.startswith('labl_event_'):
                 out['event'][k[len('labl_event_'):]] = v
@@ -311,11 +319,27 @@ class LUCiDDataset(ShardEventDataset):
                 out['particle'][k[len('labl_particle_'):]] = v
             elif k.startswith('labl_track_'):
                 out['track'][k[len('labl_track_'):]] = v
+            elif k.startswith('labl_window_'):
+                out['window'][k[len('labl_window_'):]] = v
         return out
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @property
+    def detector_geometry(self):
+        """Detector geometry dict (``half_height`` / ``radius`` / ``axis``),
+        read from the data — never hardcoded. Prefers the step reader's
+        explicit config attrs, falls back to the sensor reader's
+        (attrs when present, else derived from the PMT position table).
+        ``None`` values when no active reader can provide it."""
+        for reader in (self.step_reader, self.sensor_reader):
+            geom = getattr(reader, 'detector_geometry', None)
+            if geom is not None and (geom['half_height'] is not None
+                                     or geom['radius'] is not None):
+                return geom
+        return dict(half_height=None, radius=None, axis=None)
 
     def _hits_sensor_positions(self):
         """Best-effort fetch of hits's config/sensor_positions.
