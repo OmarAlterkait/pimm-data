@@ -54,7 +54,28 @@ class ShardReaderBase:
 
     def _find_files(self):
         """Glob shards: ``{root}/{split}/{name}_{modality}_*.h5`` then the
-        flat ``{root}/{name}_{modality}_*.h5`` fallback."""
+        flat ``{root}/{name}_{modality}_*.h5`` fallback.
+
+        ``split`` may also be a list/tuple of run names (B2 ``runs=``): each
+        run dir is globbed in the given order and every shard remembers its
+        run (``self._file_runs``) so :meth:`run_of` can qualify event names.
+        A run with no shards for this modality raises — a silently absent
+        run would positionally desync the cross-modality joint index."""
+        if isinstance(self.split, (list, tuple)):
+            files, file_runs = [], []
+            for run in self.split:
+                run_files = sorted(glob.glob(os.path.join(
+                    self.data_root, run,
+                    f"{self.dataset_name}_{self._MODALITY}_*.h5")))
+                if not run_files:
+                    raise FileNotFoundError(
+                        f"runs=: no {self._MODALITY} shards for run {run!r} "
+                        f"under {self.data_root} (dataset_name="
+                        f"{self.dataset_name!r})")
+                files.extend(run_files)
+                file_runs.extend([run] * len(run_files))
+            self._file_runs = file_runs
+            return files
         for pattern in (
             os.path.join(self.data_root, self.split,
                          f"{self.dataset_name}_{self._MODALITY}_*.h5"),
@@ -65,6 +86,12 @@ class ShardReaderBase:
             if files:
                 return files
         return []
+
+    def run_of(self, file_idx):
+        """Run name a shard came from (``''`` for single-split legacy —
+        event names stay byte-identical to the pre-``runs=`` era there)."""
+        runs = getattr(self, '_file_runs', None)
+        return runs[file_idx] if runs is not None else ''
 
     # -- index --------------------------------------------------------------
 
