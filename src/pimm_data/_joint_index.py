@@ -19,14 +19,37 @@ different modalities — silently — corrupting every cross-modality join
 the present event numbers across every loaded modality (per shard) and
 overwrites each reader's ``indices`` / ``cumulative_lengths`` with the shared
 joint index, so all readers resolve a global ``idx`` to the same
-``(file, event_num)``. Shards align by sorted-glob position.
+``(file, event_num)``.
+
+Shards align by **identity**, ``(run, shard tag)`` — the tag is the trailing
+``_NNNN`` filename token, the one identifier invariant across modalities
+(B1 scoping note). Positional (sorted-glob order) alignment mispairs
+*different physics events* silently whenever a middle shard is missing in
+one modality (partial transfer, failed per-modality production job, a
+hand-deleted corrupt file): every later shard shifts by one, and because
+event numbers restart per shard the per-shard intersection stays large.
+Tag alignment instead drops the unmatched shard from every modality (warn,
+or raise under ``strict_lengths``). Sorted-glob position remains only as a
+fallback when tags are not unique within a modality.
 """
 
 import logging
+import os
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+def _shard_key(reader, i):
+    """Cross-modality shard identity: ``(run, tag)`` where the tag is the
+    trailing ``_``-separated filename token (``sim_step_0054.h5`` →
+    ``'0054'``) — per-modality filenames differ, the tag doesn't."""
+    base = os.path.basename(reader.h5_files[i])
+    stem = base[:-3] if base.endswith('.h5') else base
+    tag = stem.rsplit('_', 1)[-1]
+    run = reader.run_of(i) if hasattr(reader, 'run_of') else ''
+    return (run, tag)
 
 
 def build_joint_index(named_readers, *, strict_lengths=False,
@@ -55,22 +78,62 @@ def build_joint_index(named_readers, *, strict_lengths=False,
 
     Side effects
     ------------
-    Overwrites ``reader.indices``, ``reader.cumulative_lengths`` and trims
-    ``reader.h5_files`` on every reader so they share the joint index.
+    Overwrites ``reader.indices`` / ``reader.cumulative_lengths`` and
+    re-selects ``reader.h5_files`` (and ``_file_runs``) to the identity-
+    aligned common shard sequence on every reader.
     """
     readers = [r for _, r in named_readers]
     if not readers:
         return 0
 
-    # Shards align by position in each modality's sorted file list (A4).
-    shard_counts = {n: len(r.h5_files) for n, r in named_readers}
-    n_files = min(shard_counts.values())
-    if len(set(shard_counts.values())) > 1:
-        msg = (f"{source_label}: shard-count mismatch across modalities "
-               f"{shard_counts}; aligning on the first {n_files} shard(s).")
-        if strict_lengths:
+    # Shards align by identity (run, tag), not glob position — a missing
+    # middle shard in one modality must drop that shard everywhere, never
+    # shift the pairing of every later shard.
+    keys_per = {n: [_shard_key(r, i) for i in range(len(r.h5_files))]
+                for n, r in named_readers}
+    tags_unique = all(len(set(ks)) == len(ks) for ks in keys_per.values())
+
+    if tags_unique:
+        common = set.intersection(*(set(ks) for ks in keys_per.values()))
+        first_keys = keys_per[named_readers[0][0]]
+        order = [k for k in first_keys if k in common]
+        dropped = {n: [k for k in ks if k not in common]
+                   for n, ks in keys_per.items()}
+        if any(dropped.values()):
+            msg = (f"{source_label}: shard mismatch across modalities — "
+                   f"aligning on {len(order)} common shard(s) by (run, tag); "
+                   f"per-modality unmatched shards: "
+                   f"{ {n: d for n, d in dropped.items() if d} }.")
+            if strict_lengths:
+                raise ValueError(msg)
+            log.warning(msg)
+        sel = {n: [ks.index(k) for k in order] for n, ks in keys_per.items()}
+    else:
+        # Fallback: tags not unique within a modality (unexpected writer
+        # naming) — legacy positional alignment on the common prefix.
+        shard_counts = {n: len(r.h5_files) for n, r in named_readers}
+        n_files = min(shard_counts.values())
+        msg = (f"{source_label}: shard tags are not unique per modality "
+               f"— falling back to sorted-glob positional alignment"
+               + (f"; shard-count mismatch {shard_counts}, aligning on the "
+                  f"first {n_files} shard(s)."
+                  if len(set(shard_counts.values())) > 1 else "."))
+        if strict_lengths and len(set(shard_counts.values())) > 1:
             raise ValueError(msg)
         log.warning(msg)
+        sel = {n: list(range(n_files)) for n, _ in named_readers}
+
+    # Re-select each reader's shard list to the aligned sequence (identity
+    # when nothing is missing — the common case).
+    for n, r in named_readers:
+        s = sel[n]
+        if s != list(range(len(r.h5_files))):
+            r.h5_files = [r.h5_files[i] for i in s]
+            r.indices = [r.indices[i] for i in s]
+            runs = getattr(r, '_file_runs', None)
+            if runs is not None:
+                r._file_runs = [runs[i] for i in s]
+    n_files = len(next(iter(sel.values())))
 
     raw_totals = {n: int(sum(len(r.indices[s]) for s in range(n_files)))
                   for n, r in named_readers}
@@ -101,5 +164,4 @@ def build_joint_index(named_readers, *, strict_lengths=False,
     for r in readers:
         r.indices = joint
         r.cumulative_lengths = cum
-        r.h5_files = r.h5_files[:n_files]
     return total
