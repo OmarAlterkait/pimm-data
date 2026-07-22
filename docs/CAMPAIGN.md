@@ -106,10 +106,16 @@ per-segment Cherenkov (needs physics-key names); optical waveform model (TBD).
 
 | Dataset | `data_root` | `dataset_name` | `split` |
 |---|---|---|---|
-| JAXTPC (wire) | `/sdf/data/neutrino/omara/JAXTPC_Wire/test_00_00_02` | `sim_wire` | `run_0027575715` (per-run nested) |
-| LUCiD (WAND) | `/sdf/data/neutrino/cjesus/DORAEMON/WAND/SK_like/config_NNNNNN` | `wc` | `''` |
+| JAXTPC (wire) | `/sdf/data/neutrino/doraemon/wire_test_00_00_02` | `sim_wire` | `run_0027575715` (type-first: `sensor/run_*/…`; 46 runs on disk as of 2026-07) |
+| LUCiD (WAND) | `/sdf/data/neutrino/cjesus/DORAEMON/OLD/SK_like/config_NNNNNN` | `wc` | `''` |
 | LUCiD step view | `/sdf/data/neutrino/omara/wand_sk_like_step/config_NNNNNN` | `wc` | `''` |
-| Optical (label) | `/sdf/data/neutrino/doraemon/optical_test_00_00_02` | `test_00_00_02_pixel` | `''` |
+| Optical (label) | `/sdf/data/neutrino/doraemon/optical_test_00_00_02/wire/run_NNNNNNNNNN/sensor_optical` | `test_00_00_02_wire` | `''` |
+
+> Optical layout changed (2026-07): the root now nests `{wire,pixel}/run_*/
+> sensor_optical/` per run (paired with the TPC runs). The flat
+> `test_00_00_02_pixel`-at-root layout this table previously recorded is gone;
+> the toy-run validation below predates the move — re-validate the loader
+> against the new files before relying on it.
 
 `examples/toy_run.py` was run against these. Loaded + ran a toy model end-to-end:
 JAXTPC ssl_step/ssl_sensor; LUCiD ssl_sensor/ssl_hits/perpmt_seg_hits (WAND
