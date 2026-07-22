@@ -18,7 +18,7 @@ from pimm_data import JAXTPCDataset, collate_fn
 from pimm_data.geometry import load_plane_registry
 from pimm_data.transform import Compose
 
-JAX = '/sdf/data/neutrino/omara/JAXTPC_Wire/test_00_00_02'
+JAX = '/sdf/data/neutrino/doraemon/wire_test_00_00_02'
 B = 2
 ITERS = 3
 

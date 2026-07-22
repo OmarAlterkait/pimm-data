@@ -10,7 +10,7 @@
 #
 # Usage:  scripts/make_wand_step_mirror.sh [SRC] [DST]
 set -euo pipefail
-SRC="${1:-/sdf/data/neutrino/cjesus/DORAEMON/WAND/SK_like}"
+SRC="${1:-/sdf/data/neutrino/cjesus/DORAEMON/OLD/SK_like}"
 DST="${2:-/sdf/data/neutrino/omara/wand_sk_like_step}"
 
 mkdir -p "$DST"

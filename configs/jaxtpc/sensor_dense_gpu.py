@@ -21,8 +21,8 @@ import os
 
 from pimm_data.geometry import load_plane_registry
 
-# real wire data: /sdf/data/neutrino/omara/JAXTPC_Wire/test_00_00_02
-# (split='run_0027575715', dataset_name='sim_wire')
+# real wire data: /sdf/data/neutrino/doraemon/wire_test_00_00_02
+# (split='run_0027575715', dataset_name='sim_wire'; type-first layout sensor/run_*/)
 _data_root = os.environ.get("JAXTPC_DATA_ROOT", "/path/to/jaxtpc/production")
 # per-plane geometry (n_wires/n_ticks/wire_lengths) for densify — config-derived;
 # must match the data's planes. (A future nicety: let the dataset inject its own

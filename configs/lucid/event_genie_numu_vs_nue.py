@@ -7,7 +7,7 @@ GENIE WAND configs. Data-loading half only; model is a placeholder.
 import os
 
 _data_root = os.environ.get("WAND_DATA_ROOT",
-                            "/sdf/data/neutrino/cjesus/DORAEMON/WAND/SK_like")
+                            "/sdf/data/neutrino/cjesus/DORAEMON/OLD/SK_like")
 _scale = 18.1
 grid_size = 0.04
 

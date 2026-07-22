@@ -37,7 +37,7 @@ except ImportError:
 
 
 # --- default dataset locations -------------------------------------------
-LUCID_DEFAULT_ROOT = '/sdf/data/neutrino/cjesus/DORAEMON/WAND/SK_like/config_000013'
+LUCID_DEFAULT_ROOT = '/sdf/data/neutrino/cjesus/DORAEMON/OLD/SK_like/config_000013'
 JAXTPC_DEFAULT_ROOT = '/sdf/home/o/omara/neutrino_data/omara/doraemon'
 JAXTPC_DEFAULT_SPLIT = 'run_0026628550'   # one complete run: 100 shards, 20k events
 
