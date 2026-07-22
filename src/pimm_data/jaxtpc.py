@@ -100,7 +100,14 @@ class JAXTPCDataset(ShardEventDataset):
         Root directory with ``step/``, ``sensor/``, ``hits/``, ``labl/``
         subdirectories.
     split : str
-        Split name for file discovery.
+        Split name for file discovery (one run directory).
+    runs : list[str] | str, optional
+        Multi-run selection in one dataset (B2): a list of run names, or a
+        glob pattern (``'run_*'``) expanded once (sorted) against the first
+        modality root with matches. Mutually exclusive with ``split=``.
+        Event names become ``'<run>/<file>_evtNNN'`` — unique across runs —
+        so content-addressed noise seeds, holdout hashing and cache identity
+        never collide (single-run ``split=`` names are unchanged).
     modalities : tuple[str]
         Any subset of ``'step'``, ``'sensor'``, ``'hits'``, ``'labl'``.
         ``('labl',)`` and ``('sensor', 'labl')`` are invalid (see
@@ -137,6 +144,7 @@ class JAXTPCDataset(ShardEventDataset):
         self,
         data_root,
         split='train',
+        runs=None,
         modalities=('step',),
         dataset_name='sim',
         volume=None,
@@ -215,6 +223,18 @@ class JAXTPCDataset(ShardEventDataset):
         self._max_len = max_len
         self._strict_lengths = strict_lengths
         self._source_data_root = data_root
+        # B2 runs=: multi-run selection in ONE dataset. A list/tuple names
+        # runs verbatim; a string is a glob expanded once (sorted) against
+        # the first modality's root. Readers receive the explicit list, and
+        # get_data_name() qualifies names as '<run>/<file>_evtNNN' so noise
+        # seeds / holdout hashes / cache identity stay unique across runs
+        # (single-run split= names are unchanged — byte-identical legacy).
+        if runs is not None:
+            if split != 'train':
+                raise ValueError(
+                    f"Pass either runs= (multi-run) or split= (single run), "
+                    f"not both (got runs={runs!r}, split={split!r}).")
+            split = self._expand_runs(runs, self._modalities)
         self._source_split = split
 
         self.step_reader = None

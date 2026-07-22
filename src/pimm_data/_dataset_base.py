@@ -20,6 +20,7 @@ create the ``{step,sensor,hits,labl}_reader`` attrs (None when absent), set
 ``get_data(idx)`` returning the nested per-modality sample dict.
 """
 
+import glob
 import os
 import logging
 
@@ -124,6 +125,34 @@ class ShardEventDataset(Dataset):
         mod_dir = os.path.join(self._source_data_root, modality)
         return mod_dir if os.path.isdir(mod_dir) else self._source_data_root
 
+    def _expand_runs(self, runs, modalities):
+        """Resolve a ``runs=`` argument to an explicit list of run names.
+
+        A string is a glob pattern (``'run_*'`` / ``'*'``) expanded ONCE
+        (sorted) against the first loaded modality root that yields run
+        directories, then the same explicit list is handed to every reader —
+        per-modality expansion could silently diverge and positionally
+        desync the joint index. A list/tuple is taken verbatim
+        (caller-chosen order)."""
+        if isinstance(runs, str):
+            tried = []
+            for m in modalities:
+                root = self._modality_root(m)
+                expanded = sorted(
+                    os.path.basename(p.rstrip(os.sep))
+                    for p in glob.glob(os.path.join(root, runs))
+                    if os.path.isdir(p))
+                if expanded:
+                    return expanded
+                tried.append(root)
+            raise FileNotFoundError(
+                f"runs={runs!r} matched no run directories under any "
+                f"modality root: {tried}")
+        runs = list(runs)
+        if not runs:
+            raise ValueError("runs= must name at least one run")
+        return runs
+
     def _readers_named(self):
         """``(modality, reader)`` for each loaded modality, in
         ``VALID_MODALITIES`` order (the order the joint index expects)."""
@@ -150,7 +179,13 @@ class ShardEventDataset(Dataset):
         reader = self._canonical_reader
         file_idx, event_num = reader.locate(idx)
         fname = os.path.basename(reader.h5_files[file_idx])
-        return f"{fname}_evt{event_num:03d}"
+        # Multi-run (B2 runs=): qualify with the run so names — and
+        # everything keyed on them (content-addressed noise seeds, holdout
+        # hashing, cache identity) — stay unique across runs. Single-split
+        # legacy names are byte-identical to before (run_of() -> '').
+        run = reader.run_of(file_idx) if hasattr(reader, 'run_of') else ''
+        prefix = f"{run}/" if run else ""
+        return f"{prefix}{fname}_evt{event_num:03d}"
 
     def __del__(self):
         for m in self.VALID_MODALITIES:
