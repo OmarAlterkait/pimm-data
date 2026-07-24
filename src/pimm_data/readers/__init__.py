@@ -14,6 +14,7 @@ from .lucid_sensor import LUCiDSensorReader
 from .lucid_hits import LUCiDHitsReader
 from .lucid_labl import LUCiDLablReader
 from .optical_sensor import OpticalSensorReader, OpticalEastWestReader
+from .coeff_tpc import CoeffTPCReader, write_coeff_shard
 
 __all__ = [
     "JAXTPCStepReader",
@@ -26,4 +27,6 @@ __all__ = [
     "LUCiDLablReader",
     "OpticalSensorReader",
     "OpticalEastWestReader",
+    "CoeffTPCReader",
+    "write_coeff_shard",
 ]
