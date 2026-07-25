@@ -25,7 +25,9 @@ Layout::
     /ident   run (n_events,), source_file (n_events,), event int64 (n_events,)
 """
 
+import glob
 import json
+import os
 
 import numpy as np
 import h5py
@@ -54,31 +56,63 @@ class CoeffTPCReader(ShardReaderBase):
         self.norm_sigma = None
         self.sigma_norm = None
         self.config_attrs = None
+        self._id2pos = {}                       # h5_path -> {physical event id: write-order position}
         self._init_shards()
 
+    def _find_files(self):
+        """Glob shards with the tag anchored to a digit — ``{name}_{modality}_[0-9]*.h5``
+        — so ``modality='coeff'`` does NOT also match ``{name}_coeff_clean_*.h5``
+        (``coeff`` is a prefix of ``coeff_clean``)."""
+        pat = f"{self.dataset_name}_{self._MODALITY}_[0-9]*.h5"
+        if isinstance(self.split, (list, tuple)):
+            files, file_runs = [], []
+            for run in self.split:
+                rf = sorted(glob.glob(os.path.join(self.data_root, run, pat)))
+                if not rf:
+                    raise FileNotFoundError(
+                        f"runs=: no {self._MODALITY} shards for run {run!r} under {self.data_root}")
+                files.extend(rf); file_runs.extend([run] * len(rf))
+            self._file_runs = file_runs
+            return files
+        for p in (os.path.join(self.data_root, self.split, pat),
+                  os.path.join(self.data_root, pat)):
+            files = sorted(glob.glob(p))
+            if files:
+                return files
+        return []
+
     def _index_for_shard(self, h5_path):
-        """Flat shards have no ``event_*`` groups — events are positional, so the
-        index is ``arange(n_events)`` (n_events from ``/config``). Also caches the
-        shared basis/geometry from the first shard."""
+        """Present event **ids** for one flat shard — the ``/ident/event`` physical
+        ids (in write order) so the cross-modality joint index aligns coeff↔coeff_clean
+        by IDENTITY, not position. Also caches shared basis/geometry, and a
+        physical-id→write-position map (event_offset is positional)."""
         meta = read_shard_meta(h5_path)
-        if self.band_lengths is None:
-            with h5py.File(h5_path, "r", libver="latest", swmr=True) as f:
-                cfg = f["config"]
+        with h5py.File(h5_path, "r", libver="latest", swmr=True) as f:
+            cfg = f["config"]
+            if self.band_lengths is None:
                 self.config_attrs = dict(cfg.attrs)
                 self.band_lengths = cfg["band_lengths"][:].astype(np.int32)
                 self.gids = cfg["gids"][:].astype(np.int32) if "gids" in cfg else None
                 self.n_wires = cfg["n_wires"][:].astype(np.int32) if "n_wires" in cfg else None
                 self.norm_sigma = cfg["norm_sigma"][:].astype(np.float32) if "norm_sigma" in cfg else None
                 self.sigma_norm = float(cfg.attrs.get("sigma_norm", 1.0))
-        return np.arange(int(meta["n_events"]), dtype=np.int64)
+            if "ident" in f and "event" in f["ident"]:
+                ev = f["ident"]["event"][:].astype(np.int64)
+            else:                                       # legacy shard without identity
+                ev = np.arange(int(meta["n_events"]), dtype=np.int64)
+        # keyed by path (not shard index) so it survives build_joint_index re-selection
+        self._id2pos[str(h5_path)] = {int(e): i for i, e in enumerate(ev)}
+        return np.asarray(ev, dtype=np.int64)
 
     def _locate_flat(self, idx):
         self._ensure_open()
-        file_idx, event_num = self.locate(idx)
-        return self._h5data[file_idx], int(event_num)
+        file_idx, event_id = self.locate(idx)           # event_id = physical /ident/event id
+        pos = self._id2pos[str(self.h5_files[file_idx])][int(event_id)]
+        return self._h5data[file_idx], pos
 
     def read_event(self, idx):
-        """One event → flat dict of coeff rows (sliced by ``event_offset``)."""
+        """One event → flat dict of coeff rows (sliced by ``event_offset`` at the
+        physical event's write position)."""
         f, ev = self._locate_flat(idx)
         coord = f["coord"]
         off = coord["event_offset"]
@@ -111,12 +145,28 @@ def write_coeff_shard(path, events, *, band_lengths, gids, n_wires, basis_attrs,
     if not events:
         raise ValueError("write_coeff_shard: no events")
 
+    # validate the basis contract so a pimm-written shard is not silently malformed
+    # (helix's reader validates on read; fail here at write time instead).
+    _REQUIRED = ("wavelet", "dwt_level", "dwt_mode", "n_ticks_raw", "pad", "sigma_norm")
+    missing = [k for k in _REQUIRED if k not in basis_attrs]
+    if missing:
+        raise ValueError(f"basis_attrs missing required keys {missing}")
+    import pywt
+    padded = int(basis_attrs["n_ticks_raw"]) + int(basis_attrs["pad"])
+    want = tuple(int(c.shape[-1]) for c in pywt.wavedec(
+        np.zeros(padded, np.float32), str(basis_attrs["wavelet"]),
+        level=int(basis_attrs["dwt_level"]), mode=str(basis_attrs["dwt_mode"])))
+    if tuple(int(x) for x in band_lengths) != want:
+        raise ValueError(
+            f"band_lengths {tuple(int(x) for x in band_lengths)} inconsistent with basis "
+            f"({basis_attrs['wavelet']} L{basis_attrs['dwt_level']} @ {padded}) → expected {want}")
+
     def cat(key, dt):
         parts = [np.asarray(e[key], dt) for e in events]
         return np.concatenate(parts) if parts else np.empty(0, dt)
 
     band = cat("band", np.uint8)
-    plane_gid = cat("plane_gid", np.uint8)
+    plane_gid = cat("plane_gid", np.int32)          # int32: gid can exceed 255 (matches helix)
     wire = cat("wire", np.int32)
     tau = cat("tau", np.int32)
     value = cat("value", np.float32)

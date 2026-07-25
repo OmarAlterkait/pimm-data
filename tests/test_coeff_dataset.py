@@ -140,3 +140,81 @@ def test_cross_repo_golden(tmp_path):
     for k in ("band", "plane_gid", "wire", "tau", "value"):
         np.testing.assert_array_equal(got[k], getattr(ce, k), err_msg=f"golden {k}")
     np.testing.assert_array_equal(r.band_lengths, np.asarray(bl, np.int32))
+
+
+# ── regression: audit fixes ─────────────────────────────────────────────────
+
+def _tagged(path, event_ids, value_offset=0.0, gids=GIDS, nwires=N_WIRES):
+    """One coeff per event; value encodes (event id + offset) so pairing is checkable."""
+    events = [dict(
+        band=np.array([1], np.uint8), plane_gid=np.array([gids[0]], np.int32),
+        wire=np.array([0], np.int32), tau=np.array([0], np.int32),
+        value=np.array([ev + value_offset], np.float32),
+        sigma_threshold=np.ones((len(gids), len(BAND_LENGTHS)), np.float32),
+        run="run_000", source_file="cx_sensor_0000.h5", event=ev) for ev in event_ids]
+    write_coeff_shard(path, events, band_lengths=BAND_LENGTHS, gids=gids,
+                      n_wires=nwires, basis_attrs=BASIS_ATTRS, dataset_name="cx")
+
+
+def test_glob_no_coeff_clean_collision(tmp_path):
+    _write_shard(tmp_path / "cx_coeff_0000.h5", n_events=3)
+    _write_shard(tmp_path / "cx_coeff_clean_0000.h5", n_events=3)   # same dir
+    assert len(CoeffTPCReader(data_root=str(tmp_path), dataset_name="cx", modality="coeff")) == 3
+    assert len(CoeffTPCReader(data_root=str(tmp_path), dataset_name="cx", modality="coeff_clean")) == 3
+    assert len(CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx")) == 3
+
+
+def test_join_by_identity_not_position(tmp_path):
+    _tagged(tmp_path / "cx_coeff_0000.h5", [10, 11, 12], value_offset=0.0)
+    _tagged(tmp_path / "cx_coeff_clean_0000.h5", [10, 12], value_offset=0.5)   # event 11 dropped
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff", "coeff_clean"))
+    assert len(ds) == 2                                    # intersection {10,12}
+    for i in range(2):
+        d = ds.get_data(i)
+        nv = float(d["coeff"]["value"][0, 0])
+        cv = float(d["coeff_clean"]["value"][0, 0])
+        assert cv - nv == 0.5, f"idx {i}: noisy {nv} paired with clean {cv} (mispair)"
+
+
+def test_writer_validates_basis(tmp_path):
+    ev = [dict(band=np.array([1], np.uint8), plane_gid=np.array([0], np.int32),
+               wire=np.array([0], np.int32), tau=np.array([0], np.int32),
+               value=np.array([1.0], np.float32),
+               sigma_threshold=np.ones((len(GIDS), len(BAND_LENGTHS)), np.float32),
+               run="r", source_file="s.h5", event=0)]
+    missing = {k: v for k, v in BASIS_ATTRS.items() if k != "pad"}
+    with pytest.raises(ValueError, match="missing required"):
+        write_coeff_shard(tmp_path / "x_coeff_0000.h5", ev, band_lengths=BAND_LENGTHS,
+                          gids=GIDS, n_wires=N_WIRES, basis_attrs=missing, dataset_name="x")
+    with pytest.raises(ValueError, match="inconsistent"):
+        write_coeff_shard(tmp_path / "y_coeff_0000.h5", ev, band_lengths=[8, 8, 99],
+                          gids=GIDS, n_wires=N_WIRES, basis_attrs=BASIS_ATTRS, dataset_name="y")
+
+
+def test_plane_gid_beyond_255(tmp_path):
+    _tagged(tmp_path / "cx_coeff_0000.h5", [0], gids=[300, 301])
+    r = CoeffTPCReader(data_root=str(tmp_path), dataset_name="cx")
+    assert int(r.read_event(0)["plane_gid"][0]) == 300      # no uint8 wrap
+
+
+@pytest.mark.skipif(not os.path.isdir(_HELIX) or not _import_helix(),
+                    reason="helix not importable")
+def test_reverse_golden_pimm_write_helix_read(tmp_path):
+    from helix.core.provenance import BasisDescriptor, derive_band_lengths
+    from helix.core.coeff_io import read_coeff_event as hx_read
+    bl = derive_band_lengths("db2", 2, "periodization", 32)      # == BAND_LENGTHS
+    basis = BasisDescriptor(wavelet="db2", level=2, mode="periodization", n_ticks_raw=32,
+                            pad=0, band_lengths=bl, removal={}, threshold={}, sigma_norm=2.6)
+    battrs = dict(wavelet="db2", dwt_level=2, dwt_mode="periodization", n_ticks_raw=32,
+                  pad=0, sigma_norm=2.6, basis_digest=basis.digest(),
+                  removal_json="{}", threshold_json="{}")
+    ev = [dict(band=np.array([1], np.uint8), plane_gid=np.array([0], np.int32),
+               wire=np.array([0], np.int32), tau=np.array([0], np.int32),
+               value=np.array([3.0], np.float32),
+               sigma_threshold=np.ones((len(GIDS), len(bl)), np.float32),
+               run="r", source_file="s.h5", event=0)]
+    write_coeff_shard(tmp_path / "cx_coeff_0000.h5", ev, band_lengths=list(bl),
+                      gids=GIDS, n_wires=N_WIRES, basis_attrs=battrs, dataset_name="cx")
+    ce = hx_read(tmp_path / "cx_coeff_0000.h5", 0)              # helix reads + validates
+    assert float(ce.value[0]) == 3.0 and int(ce.plane_gid[0]) == 0
