@@ -108,8 +108,15 @@ class CoeffTPCDataset(ShardEventDataset):
 
     @property
     def norm_sigma(self):
-        """The shard's cross-event normalization σ table (for the tokenizer)."""
+        """The shard's cross-event normalization σ table (n_gid, n_bands), for the
+        tokenizer. Rows are indexed by POSITION in :attr:`gids`, not gid value — a
+        tokenizer must map ``gids.index(gid)`` to the row (gids may be non-contiguous)."""
         return self._canonical_reader.norm_sigma if self._canonical_reader else None
+
+    @property
+    def gids(self):
+        """Plane gids (the row order of :attr:`norm_sigma` / sigma_threshold)."""
+        return self._canonical_reader.gids if self._canonical_reader else None
 
     @property
     def band_lengths(self):
