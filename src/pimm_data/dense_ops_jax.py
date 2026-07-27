@@ -16,6 +16,19 @@ import numpy as np
 
 __all__ = ["densify_plane_jax", "densify_jax"]
 
+# A single monotonic scatter capacity. A per-call power-of-two ladder still
+# recompiles whenever an event crosses a bucket; one capacity that only ever
+# grows means the scatter compiles ONCE for a given detector (twice at worst, if
+# an early event is unusually small).
+_CAP = 1 << 19
+
+
+def _cap_for(n):
+    global _CAP
+    while n > _CAP:
+        _CAP <<= 1
+    return _CAP
+
 
 def _jnp():
     import jax.numpy as jnp
@@ -46,7 +59,7 @@ def densify_plane_jax(wire, time, value, n_wires, n_ticks):
     grid = jnp.zeros((int(n_wires), int(n_ticks)), jnp.float32)
     if n == 0:
         return grid
-    cap = 1 << (n - 1).bit_length()                     # static shape ladder
+    cap = _cap_for(n)                                   # ONE shape, monotonic
     if cap > n:                                         # pad out of range -> dropped
         pad = cap - n
         w = np.concatenate([w, np.full(pad, n_wires, w.dtype)])
