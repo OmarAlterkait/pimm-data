@@ -13,12 +13,16 @@ Provenance:
   (itself a port of JAXTPC ``tools.coherent_noise``), including the two details
   that are easy to get wrong: the adjacent-group anti-correlation is applied
   BEFORE normalisation, and the RMS renormalisation uses the **pooled-global**
-  measured RMS over all groups (not per-group) — the coupling inflates variance,
-  so an analytic norm runs ~2% high at the default beta.
+  measured RMS over all groups (not per-group).
+
+**Everything numeric runs inside ``jax.jit``.** Left as plain ``jnp`` calls these
+run one kernel at a time, where JAX's per-op dispatch is ~5x torch's and nothing
+fuses: measured 11.2 ms (coherent) and 10.0 ms (incoherent) per 1969x4321 plane.
+Jitted they are 0.42 ms and 2.98 ms — *faster* than the torch equivalents in
+``dense_ops`` (1.00 / 3.48 ms). Only shapes and scalars are static, so a detector
+compiles each core once.
 
 jax is imported lazily at call time, so importing pimm-data never pulls it in.
-
-Measured on an RTX 2080 Ti (1969x4336 plane): incoherent 1252 ms -> 1.8 ms (696x).
 """
 
 import numpy as np
@@ -31,25 +35,58 @@ from .noise import (
 
 __all__ = ["incoherent_noise_jax", "coherent_noise_jax", "generate_noise_jax"]
 
+_CORES = None
+
 
 def _jnp():
     import jax.numpy as jnp
     return jnp
 
 
-def _rfft_normal(key, shape, spec, n_ticks):
-    """Complex spectrum with N(0,1) real/imag shaped by ``spec``, DC (and Nyquist
-    for even ``n_ticks``) forced real — then irfft. Shared by both components."""
-    import jax
-    jnp = _jnp()
-    k_re, k_im = jax.random.split(key, 2)
-    real = jax.random.normal(k_re, shape) * spec
-    imag = jax.random.normal(k_im, shape) * spec
-    cpx = real + 1j * imag
-    cpx = cpx.at[..., 0].set(cpx[..., 0].real)
-    if n_ticks % 2 == 0:
-        cpx = cpx.at[..., -1].set(cpx[..., -1].real)
-    return jnp.fft.irfft(cpx, n=n_ticks, axis=-1)
+def _cores():
+    """Build (and cache) the jitted incoherent/coherent cores."""
+    global _CORES
+    if _CORES is None:
+        import functools
+        import jax
+        import jax.numpy as jnp
+
+        def _rfft_normal(key, shape, spec, n_ticks):
+            """N(0,1) real/imag shaped by ``spec``, DC (and Nyquist for even
+            ``n_ticks``) forced real, then irfft."""
+            k_re, k_im = jax.random.split(key, 2)
+            real = jax.random.normal(k_re, shape) * spec
+            imag = jax.random.normal(k_im, shape) * spec
+            cpx = real + 1j * imag
+            cpx = cpx.at[..., 0].set(cpx[..., 0].real)
+            if n_ticks % 2 == 0:
+                cpx = cpx.at[..., -1].set(cpx[..., -1].real)
+            return jnp.fft.irfft(cpx, n=n_ticks, axis=-1)
+
+        @functools.partial(jax.jit, static_argnames=("n_ch", "n_ticks"))
+        def _inc(key, spec, series_rms, white_x, n_ch, n_ticks):
+            k_s, k_w = jax.random.split(key, 2)
+            shaped = _rfft_normal(k_s, (n_ch, spec.shape[0]), spec[None, :], n_ticks)
+            cur = jnp.maximum(jnp.std(shaped, axis=1, keepdims=True), 1e-10)
+            shaped = shaped / cur * series_rms[:, None]
+            white = jax.random.normal(k_w, (n_ch, n_ticks)) * white_x
+            return (shaped + white).astype(jnp.float32)
+
+        @functools.partial(jax.jit, static_argnames=("n_ch", "n_ticks", "gs"))
+        def _coh(key, spec, rms_adc, beta, n_ch, n_ticks, gs):
+            n_groups = (n_ch + gs - 1) // gs
+            base = _rfft_normal(key, (n_groups, spec.shape[0]), spec[None, :], n_ticks)
+            z = jnp.zeros((1, n_ticks), base.dtype)
+            left = jnp.concatenate([z, base[:-1]], axis=0)
+            right = jnp.concatenate([base[1:], z], axis=0)
+            wav = base - beta * (left + right)
+            realized = jnp.sqrt(jnp.mean(wav.astype(jnp.float32) ** 2))
+            wav = jnp.where(realized > 0,
+                            wav * (rms_adc / jnp.maximum(realized, 1e-30)), wav)
+            return wav[jnp.arange(n_ch) // gs].astype(jnp.float32)
+
+        _CORES = (_inc, _coh)
+    return _CORES
 
 
 def incoherent_noise_jax(key, n_channels, n_ticks, wire_lengths_m, *,
@@ -62,10 +99,8 @@ def incoherent_noise_jax(key, n_channels, n_ticks, wire_lengths_m, *,
     ``series_spectrum=(freqs_hz, amps)`` gives the COLORED spectrum; ``None`` is
     white (the old FM-corpus default, and the bug that motivated the rebuild).
     """
-    import jax
     jnp = _jnp()
     white_x, series_y, series_z = enc
-
     L = np.asarray(wire_lengths_m, dtype=np.float64).reshape(-1)
     if L.shape[0] == 1:
         L = np.full(n_channels, L[0])
@@ -73,19 +108,11 @@ def incoherent_noise_jax(key, n_channels, n_ticks, wire_lengths_m, *,
         raise ValueError(
             f"wire_lengths_m has {L.shape[0]} entries but {n_channels} channels")
     series_rms = jnp.asarray((series_y + series_z * L).astype(np.float32))
-
-    n_freq = n_ticks // 2 + 1
     spec_np = _series_spectrum_shape(n_ticks, series_spectrum, sampling_rate_hz)
-    spec = jnp.ones(n_freq, jnp.float32) if spec_np is None \
-        else jnp.asarray(np.asarray(spec_np, np.float32))
-
-    k_shape, k_white = jax.random.split(key, 2)
-    shaped = _rfft_normal(k_shape, (n_channels, n_freq), spec[None, :], n_ticks)
-    cur = jnp.maximum(jnp.std(shaped, axis=1, keepdims=True), 1e-10)
-    shaped = shaped / cur * series_rms[:, None]
-
-    white = jax.random.normal(k_white, (n_channels, n_ticks)) * white_x
-    return (shaped + white).astype(jnp.float32)
+    spec = (jnp.ones(n_ticks // 2 + 1, jnp.float32) if spec_np is None
+            else jnp.asarray(np.asarray(spec_np, np.float32)))
+    return _cores()[0](key, spec, series_rms, float(white_x),
+                       int(n_channels), int(n_ticks))
 
 
 def coherent_noise_jax(key, n_channels, n_ticks, *, group_size=DEFAULT_GROUP_SIZE,
@@ -95,33 +122,16 @@ def coherent_noise_jax(key, n_channels, n_ticks, *, group_size=DEFAULT_GROUP_SIZ
                        sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ):
     """Per-group shared waveform broadcast to channels ``(n_channels, n_ticks)``.
 
-    One waveform per group with adjacent-group anti-correlation
-    ``w'(g) = w(g) - beta*(w(g-1) + w(g+1))``, then renormalised to ``rms_adc``
-    by the POOLED-GLOBAL measured RMS **after** the coupling (matching
-    :func:`pimm_data.noise.coherent_noise` / JAXTPC).
+    Adjacent-group anti-correlation ``w'(g) = w(g) - beta*(w(g-1) + w(g+1))``,
+    then renormalised to ``rms_adc`` by the POOLED-GLOBAL measured RMS **after**
+    the coupling (matching :func:`pimm_data.noise.coherent_noise` / JAXTPC).
     """
     jnp = _jnp()
-    n_groups = (n_channels + group_size - 1) // group_size
     spec = jnp.asarray(np.asarray(
         _coherent_spectrum(n_ticks, corner_freq_hz, spectral_slope, sampling_rate_hz),
         np.float32))
-
-    base = _rfft_normal(key, (n_groups, spec.shape[0]), spec[None, :], n_ticks)
-
-    z = jnp.zeros((1, n_ticks), base.dtype)
-    left = jnp.concatenate([z, base[:-1]], axis=0)
-    right = jnp.concatenate([base[1:], z], axis=0)
-    waveforms = base - beta * (left + right)
-
-    # float32 accumulate: jax_enable_x64 is off by default, so a float64 request
-    # would silently truncate anyway. Verified against the float64 numpy path —
-    # realized RMS agrees to 4 decimals (2.4999 vs 2.5010 on 1969x4336).
-    realized = jnp.sqrt(jnp.mean(waveforms.astype(jnp.float32) ** 2))
-    waveforms = jnp.where(realized > 0, waveforms * (rms_adc / jnp.maximum(realized, 1e-30)),
-                          waveforms)
-
-    idx = jnp.arange(n_channels) // group_size
-    return waveforms[idx].astype(jnp.float32)
+    return _cores()[1](key, spec, float(rms_adc), float(beta),
+                       int(n_channels), int(n_ticks), int(group_size))
 
 
 def generate_noise_jax(key, shape, *, wire_lengths_m=None, incoherent=True,
