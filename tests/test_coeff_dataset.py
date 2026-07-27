@@ -70,7 +70,9 @@ def test_dataset_get_data(tmp_path):
     ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx")
     assert len(ds) == 3
     d = ds.get_data(0)
-    assert set(d["coeff"]) == {"band", "plane_gid", "wire", "tau", "value"}
+    assert set(d["coeff"]) == {"band", "plane_gid", "wire", "tau", "value", "_meta"}
+    # shard tables ride WITH the sample so a worker-side tokenizer is self-sufficient
+    assert set(d["coeff"]["_meta"]) >= {"gids", "n_wires", "band_lengths", "norm_sigma"}
     np.testing.assert_array_equal(d["coeff"]["band"], events[0]["band"])
     assert d["coeff"]["value"].shape == (len(events[0]["value"]), 1)
     np.testing.assert_array_equal(ds.band_lengths, BAND_LENGTHS)
