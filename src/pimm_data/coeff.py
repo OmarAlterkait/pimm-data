@@ -16,9 +16,12 @@ shards and emits a **nested** dict with a ``coeff`` part of per-coefficient rows
     }
 
 Targets are separate joined modalities (``modalities=('coeff','coeff_clean')``):
-the clean target is its own ``coeff_clean`` shard family, aligned by identity. The
-model tokenizer (in pimm) turns rows → tokens and normalizes with the shard's
-``norm_sigma`` (exposed on the reader); this dataset only yields rows.
+the clean target is its own ``coeff_clean`` shard family, aligned by identity.
+This dataset only yields ROWS — tokenization belongs to the model side and lives
+in ``helix.tokenize`` (:class:`helix.tokenize.CoeffTokenize`), which a recipe
+registers into :data:`pimm_data.TRANSFORMS`. The shard tables the tokenizer needs
+(``gids``/``n_wires``/``band_lengths``/``norm_sigma``) ride along in
+``sample['coeff']['_meta']`` so a DataLoader worker is self-sufficient.
 
 Canonical Collect (coeff rows = one part, offset counts coeffs/event)::
 
@@ -90,13 +93,29 @@ class CoeffTPCDataset(ShardEventDataset):
             'split': self.split if isinstance(self.split, str) else 'custom',
         }
         if self.coeff_reader is not None:
-            data['coeff'] = self._build_coeff(self.coeff_reader.read_event(real_idx))
+            data['coeff'] = self._build_coeff(self.coeff_reader.read_event(real_idx),
+                                              meta=self._shard_meta())
         if self.coeff_clean_reader is not None:
-            data['coeff_clean'] = self._build_coeff(self.coeff_clean_reader.read_event(real_idx))
+            data['coeff_clean'] = self._build_coeff(
+                self.coeff_clean_reader.read_event(real_idx))
         return data
 
+    def _shard_meta(self):
+        """Shard-level tables a tokenizer needs, travelling WITH the sample.
+
+        A tokenizer runs in a DataLoader worker and cannot reach back to the
+        dataset object, so the shard's ``/config`` tables ride along. They are
+        small (a few hundred bytes) and ``Collect`` drops ``_meta``, so they never
+        reach the batch. Note ``norm_sigma`` rows are ordered by POSITION in
+        ``gids`` — consumers must resolve through ``gids``, never index by gid.
+        """
+        r = self._canonical_reader
+        return dict(gids=r.gids, n_wires=r.n_wires,
+                    band_lengths=r.band_lengths, norm_sigma=r.norm_sigma,
+                    sigma_norm=r.sigma_norm)
+
     @staticmethod
-    def _build_coeff(raw):
+    def _build_coeff(raw, meta=None):
         """Neutral coeff rows: coords as columns + value as an (M,1) feature."""
         return {
             'band': raw['band'],
@@ -104,6 +123,7 @@ class CoeffTPCDataset(ShardEventDataset):
             'wire': raw['wire'],
             'tau': raw['tau'],
             'value': raw['value'][:, None].astype(np.float32),
+            **({'_meta': meta} if meta else {}),
         }
 
     @property
