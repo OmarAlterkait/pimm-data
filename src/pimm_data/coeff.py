@@ -37,7 +37,7 @@ import numpy as np
 
 from .builder import DATASETS
 from ._dataset_base import ShardEventDataset
-from .readers.coeff_tpc import CoeffTPCReader
+from .readers.coeff_tpc import CoeffTPCReader, coord_digest
 
 
 @DATASETS.register_module()
@@ -57,8 +57,16 @@ class CoeffTPCDataset(ShardEventDataset):
         loop=1,
         max_len=-1,
         ignore_index=-1,
-        strict_lengths=False,
+        strict_lengths=True,
     ):
+        # strict by DEFAULT, unlike the other datasets. A coeff corpus is built
+        # by hundreds of independent jobs, and four separate failure shapes —
+        # a missing coeff_clean pair, a truncated shard, a shard absent mid-run,
+        # a job that died after writing only its noisy file — all resolve to the
+        # joint index quietly ALIGNING on what it found and emitting a log
+        # warning. Each silently shortens the corpus (measured: 25% gone from a
+        # missing pair) in a way no downstream check can see. Pass
+        # strict_lengths=False deliberately to read a partial corpus mid-build.
         self._modalities = tuple(modalities)
         self._validate_modalities(self._modalities)
         self._dataset_name = dataset_name
@@ -92,13 +100,55 @@ class CoeffTPCDataset(ShardEventDataset):
             'name': self.get_data_name(real_idx),
             'split': self.split if isinstance(self.split, str) else 'custom',
         }
+        raw_noisy = None
         if self.coeff_reader is not None:
-            data['coeff'] = self._build_coeff(self.coeff_reader.read_event(real_idx),
-                                              meta=self._shard_meta())
+            raw_noisy = self.coeff_reader.read_event(real_idx)
+            data['coeff'] = self._build_coeff(raw_noisy, meta=self._shard_meta())
         if self.coeff_clean_reader is not None:
+            raw_clean = self.coeff_clean_reader.read_event(real_idx)
+            if 'band' not in raw_clean:                  # values-only target
+                raw_clean = self._inherit_coords(raw_clean, raw_noisy, real_idx)
+            # a clean-only dataset still needs the shard tables for a tokenizer
             data['coeff_clean'] = self._build_coeff(
-                self.coeff_clean_reader.read_event(real_idx))
+                raw_clean, meta=None if raw_noisy is not None else self._shard_meta())
         return data
+
+    def _inherit_coords(self, raw_clean, raw_noisy, idx):
+        """Supply a values-only target's coords from its paired noisy event.
+
+        The clean target is CO-SUPPORTED, so its coords are the noisy event's and
+        are not stored twice (13 of every 34 bytes in a pair). ``coord_digest``
+        is what makes that safe: without the check a mispaired shard misaligns
+        every target row silently, and the model trains against noise.
+        """
+        if raw_noisy is None:
+            raise ValueError(
+                "modalities=('coeff_clean',) cannot be read alone: the clean shard is "
+                "values-only and inherits its coords from the paired 'coeff' shard. "
+                "Use modalities=('coeff', 'coeff_clean').")
+        if raw_clean['value'].shape[0] != raw_noisy['value'].shape[0]:
+            raise ValueError(
+                f"event {idx}: clean has {raw_clean['value'].shape[0]} rows, noisy has "
+                f"{raw_noisy['value'].shape[0]} — the shards are not co-supported.")
+        want = raw_clean.get('_coord_digest')
+        if want is None:
+            # values-only + no digest = unverifiable pairing. Narrow on purpose:
+            # this fires only for has_coords=False shards, so pre-digest legacy
+            # shards (which carry their own coords) keep reading.
+            raise ValueError(
+                f"event {idx}: the coeff_clean shard is values-only but carries no "
+                f"coord_digest — its pairing with 'coeff' cannot be verified. "
+                f"Rebuild it with a current writer.")
+        got = raw_noisy.get('_coord_digest')
+        if got is None:
+            got = coord_digest(raw_noisy['band'], raw_noisy['plane_gid'],
+                               raw_noisy['wire'], raw_noisy['tau'])
+        if int(got) != int(want):
+            raise ValueError(
+                f"event {idx}: coord_digest mismatch (clean {int(want):#018x} vs noisy "
+                f"{int(got):#018x}) — MISPAIRED coeff/coeff_clean shards.")
+        return {**raw_clean, **{k: raw_noisy[k]
+                                for k in ('band', 'plane_gid', 'wire', 'tau')}}
 
     def _shard_meta(self):
         """Shard-level tables a tokenizer needs, travelling WITH the sample.

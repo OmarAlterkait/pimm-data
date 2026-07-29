@@ -15,8 +15,27 @@ Tests that only make sense on real data should use
 synthesizer.
 """
 
+import importlib.util
 import os
+
 import pytest
+
+# Load jax FIRST, before pytest imports any test module (and so before torch,
+# h5py and ~140 other extension modules land in the process). Importing it late
+# — as `test_noise_jax.py`'s importorskip does — segfaults the interpreter during
+# `jax/_src/tree_util.py`'s import, inside a garbage collection, but only once
+# __pycache__ is warm. The crash is timing-sensitive to heap state, so it comes
+# and goes as unrelated test code is added; controlling the load order removes
+# the sensitivity instead of chasing it.
+#
+# find_spec first, and NO array/PRNGKey construction here: importing jax must not
+# initialise the CUDA backend at collection time, or a node with an absent or
+# broken driver fails to COLLECT rather than skipping.
+try:
+    if importlib.util.find_spec("jax") is not None:
+        import jax  # noqa: F401
+except Exception:                      # absent, broken, or unimportable — fine
+    pass
 
 from pimm_data.testing import (make_jaxtpc_sample, make_lucid_sample,
                                make_optical_sample)

@@ -13,11 +13,32 @@ from pimm_data.noise import (coherent_noise, incoherent_noise, generate_noise,
                              DEFAULT_ENC)
 
 jax = pytest.importorskip("jax", reason="jax not installed")
+
+
+def _jax_device_ok():
+    """jax importable is not the same as jax USABLE.
+
+    On a node with no visible GPU this build raises from `cuInit` instead of
+    falling back to CPU, so every test here failed with a RuntimeError rather
+    than skipping. Probe once, defensively, and skip the module if the backend
+    cannot produce a device (set JAX_PLATFORMS=cpu to run them on CPU)."""
+    try:
+        return bool(jax.devices())
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _jax_device_ok(),
+    reason="jax has no usable device (set JAX_PLATFORMS=cpu to run on CPU)")
 from pimm_data.noise_jax import (  # noqa: E402
     coherent_noise_jax, incoherent_noise_jax, generate_noise_jax)
 
 NW, NT, GS = 256, 512, 64
-KEY = jax.random.PRNGKey(0)
+# No module-level PRNGKey: constructing one initialises the JAX backend at
+# COLLECTION time, so a node with an absent or broken GPU driver fails to collect
+# (RuntimeError: Unable to initialize backend 'cuda') instead of skipping — real
+# breakage then looks like infrastructure noise. Keys are built inside tests.
 
 
 def _key():
