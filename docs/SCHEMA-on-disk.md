@@ -157,6 +157,56 @@ gap_threshold_mm, git_*`). No `num_wires`/`volume_ranges`/`readout_type`.
 
 ---
 
+## 5. COEFF — `{dataset}_coeff_{NNNN}.h5` / `{dataset}_coeff_clean_{NNNN}.h5`
+
+Wavelet-coefficient corpus produced by helix DSP (schema of record:
+`helix/COEFF_CORPUS_DESIGN.md` §3; reference codec `helix/core/coeff_io.py`).
+Unlike the modalities above this is **flat columnar, not per-event groups**: one
+shard-wide array per column plus an `event_offset` index, so an event is one
+contiguous slice. Read by `CoeffTPCReader` / `CoeffTPCDataset` with standalone
+h5py — pimm-data never imports helix at read time.
+
+**`/config`** attrs: `n_events, dataset_name, file_index, global_event_offset,
+readout_type, wavelet, dwt_level, dwt_mode, n_ticks_raw, pad, sigma_norm,
+basis_digest, removal_json, threshold_json, has_coords, noise_json`.
+Datasets: `band_lengths (n_bands,) int32`, `gids (G,) int32`,
+`n_wires (G,) int32`, `norm_sigma (G, n_bands) float32`.
+
+| Dataset | shape | meaning |
+|---|---|---|
+| `coord/band` | `(M,)` uint8 | band index into `[cA, cD_L, …, cD_1]` |
+| `coord/plane_gid` | `(M,)` **int32** | canonical plane id `v*3 + {U,V,Y}` (int32: gid can exceed 255) |
+| `coord/wire` | `(M,)` int32 | signal index within the plane |
+| `coord/tau` | `(M,)` int32 | within-band coefficient index |
+| `coord/event_offset` | `(n_events+1,)` int64 | event boundaries; slice `[off[i]:off[i+1]]` |
+| `coord/coord_digest` | `(n_events,)` uint64 | blake2b of the event's 4 coord columns |
+| `coord/sigma_threshold` | `(n_events, G, n_bands)` f32 | per-event threshold σ |
+| `value` | `(M,)` float32 | **RAW** coefficient (normalized at tokenize, not on disk) |
+| `ident/{run,source_file,event}` | `(n_events,)` | per-event identity — the join key |
+
+**Two invariants that are load-bearing:**
+
+- `norm_sigma` and `sigma_threshold` rows are indexed by **POSITION in `gids`**,
+  never by gid value. With a dead plane the two differ and `norm_sigma[gid]`
+  silently selects another plane's σ. Resolve through `helix.tokenize.gid_rows`.
+- `norm_sigma` must be **identical across every shard of a corpus** (build with
+  `--norm-sigma`). `CoeffTPCReader` verifies this and refuses shards that
+  disagree on it, on `gids`/`n_wires`/`band_lengths`, or on `sigma_norm`.
+
+**`coeff_clean` is values-only** (`has_coords=False`): the clean target is
+co-supported with the noisy input — same `(band, plane_gid, wire, tau)` by
+construction — so it stores no coordinate columns and inherits them from the
+paired `coeff` shard. `coord_digest` is written to both and compared on join, so
+a mispairing raises rather than misaligning every target row. It therefore cannot
+be read alone: `modalities=('coeff_clean',)` is rejected.
+
+**Reader output** (`CoeffTPCDataset.get_data`): a `coeff` part with
+`band, plane_gid, wire, tau, value (M,1)` plus `_meta`
+(`gids, n_wires, band_lengths, norm_sigma, sigma_norm`) so a worker-side
+tokenizer is self-sufficient. Tokenization itself lives in `helix.tokenize`.
+
+---
+
 ## In-memory output-dict contract (companion)
 Datasets emit a **nested** dict (not bare `coord`); consumers pick a stream via
 `ApplyToStream`/`Collect(stream=...)`. Top-level: `name`, `split`, plus loaded

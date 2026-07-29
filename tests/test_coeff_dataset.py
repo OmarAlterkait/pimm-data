@@ -18,9 +18,12 @@ from pimm_data.transform import Compose
 BAND_LENGTHS = [8, 8, 16]
 GIDS = [0, 1]
 N_WIRES = [4, 4]
+# NO basis_digest: the writer computes it. Hardcoding one ("deadbeef") produced
+# shards that pimm-data wrote happily and helix's reader refused — the entire
+# fixture set was unreadable by the reference codec.
 BASIS_ATTRS = dict(
     wavelet="db2", dwt_level=2, dwt_mode="periodization", n_ticks_raw=32, pad=0,
-    sigma_norm=2.6, basis_digest="deadbeef",
+    sigma_norm=2.6,
     removal_json=json.dumps(dict(kind="gate", kgate=3.0)),
     threshold_json=json.dumps(dict(method="universal")),
 )
@@ -170,7 +173,7 @@ def test_join_by_identity_not_position(tmp_path):
     _tagged(tmp_path / "cx_coeff_0000.h5", [10, 11, 12], value_offset=0.0)
     _tagged(tmp_path / "cx_coeff_clean_0000.h5", [10, 12], value_offset=0.5)   # event 11 dropped
     ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
-                         modalities=("coeff", "coeff_clean"))
+                         modalities=("coeff", "coeff_clean"), strict_lengths=False)
     assert len(ds) == 2                                    # intersection {10,12}
     for i in range(2):
         d = ds.get_data(i)
@@ -220,3 +223,310 @@ def test_reverse_golden_pimm_write_helix_read(tmp_path):
                       gids=GIDS, n_wires=N_WIRES, basis_attrs=battrs, dataset_name="cx")
     ce = hx_read(tmp_path / "cx_coeff_0000.h5", 0)              # helix reads + validates
     assert float(ce.value[0]) == 3.0 and int(ce.plane_gid[0]) == 0
+
+
+# ── multi-shard: the seam every earlier test missed (all used one _0000.h5) ──
+
+def _ev(rng, ev, n=6, gids=GIDS, nb=len(BAND_LENGTHS)):
+    band = rng.integers(0, nb, n).astype(np.uint8)
+    gid = rng.choice(np.asarray(gids), n).astype(np.int32)
+    wire = rng.integers(0, 4, n).astype(np.int32)
+    tau = np.array([rng.integers(0, BAND_LENGTHS[b]) for b in band], np.int32)
+    # unique coords: a real CoeffEvent has one value per (gid,band,wire,tau)
+    key = (gid.astype(np.int64) << 40) | (band.astype(np.int64) << 36) \
+        | (wire.astype(np.int64) << 18) | tau
+    _, keep = np.unique(key, return_index=True)
+    keep = np.sort(keep)
+    return dict(band=band[keep], plane_gid=gid[keep], wire=wire[keep], tau=tau[keep],
+                value=rng.standard_normal(keep.size).astype(np.float32),
+                sigma_threshold=np.full((len(gids), nb), 1.5, np.float32),
+                run="run_000", source_file=f"cx_sensor_{ev // 2:04d}.h5", event=ev)
+
+
+def _write_pair(dirpath, event_ids, file_index=0, norm_sigma=None, seed=0,
+                gids=GIDS, values_only_clean=True):
+    """A noisy shard + its co-supported clean target, as build_corpus writes them."""
+    rng = np.random.default_rng(seed)
+    evs = [_ev(rng, e, gids=gids) for e in event_ids]
+    kw = dict(band_lengths=BAND_LENGTHS, gids=gids, n_wires=N_WIRES,
+              basis_attrs=BASIS_ATTRS, dataset_name="cx", file_index=file_index,
+              norm_sigma=norm_sigma)
+    write_coeff_shard(dirpath / f"cx_coeff_{file_index:04d}.h5", evs, **kw)
+    clean = [{**e, "value": e["value"] * 0.5} for e in evs]      # same coords
+    write_coeff_shard(dirpath / f"cx_coeff_clean_{file_index:04d}.h5", clean,
+                      coords=not values_only_clean, **kw)
+    return evs
+
+
+def test_multi_shard_indexing_and_identity(tmp_path):
+    """Two shards per modality. Every earlier test wrote exactly one, so the
+    global index across shards was entirely unexercised."""
+    ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
+    a = _write_pair(tmp_path, [0, 1, 2], file_index=0, norm_sigma=ns, seed=1)
+    b = _write_pair(tmp_path, [3, 4], file_index=1, norm_sigma=ns, seed=2)
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff", "coeff_clean"))
+    assert len(ds) == 5
+    for i, want in enumerate(a + b):
+        d = ds.get_data(i)
+        np.testing.assert_array_equal(d["coeff"]["band"], want["band"],
+                                      err_msg=f"event {i} crosses a shard boundary wrong")
+        # the clean target is values-only: coords must come from the noisy side
+        np.testing.assert_array_equal(d["coeff_clean"]["wire"], want["wire"])
+        np.testing.assert_allclose(d["coeff_clean"]["value"][:, 0],
+                                   want["value"] * 0.5, rtol=1e-6)
+
+
+def test_norm_sigma_must_be_frozen_across_shards(tmp_path):
+    """norm_sigma is corpus-wide: row i normalises any event in any shard. A
+    per-shard table means the same physical coefficient is scaled differently
+    depending on which shard it landed in — and the reader used to serve shard
+    0's table for every event, silently."""
+    ns0 = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
+    ns1 = np.full((len(GIDS), len(BAND_LENGTHS)), 9.0, np.float32)     # disagrees
+    _write_pair(tmp_path, [0, 1], file_index=0, norm_sigma=ns0, seed=1)
+    _write_pair(tmp_path, [2, 3], file_index=1, norm_sigma=ns1, seed=2)
+    with pytest.raises(ValueError, match="disagree on /config/norm_sigma"):
+        CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx")
+
+    # and the frozen case is accepted, serving the one true table
+    ok = tmp_path / "ok"; ok.mkdir()
+    _write_pair(ok, [0, 1], file_index=0, norm_sigma=ns0, seed=1)
+    _write_pair(ok, [2, 3], file_index=1, norm_sigma=ns0, seed=2)
+    ds = CoeffTPCDataset(data_root=str(ok), dataset_name="cx")
+    np.testing.assert_allclose(ds.norm_sigma, ns0)
+
+
+def test_shards_disagreeing_on_plane_set_are_rejected(tmp_path):
+    _write_pair(tmp_path, [0, 1], file_index=0, seed=1)
+    _write_pair(tmp_path, [2, 3], file_index=1, seed=2, gids=[7, 9])
+    with pytest.raises(ValueError, match="disagree on /config/gids"):
+        CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx")
+
+
+def test_values_only_clean_shard_saves_space_and_detects_mispairing(tmp_path):
+    import h5py
+    _write_pair(tmp_path, [0, 1, 2], seed=3)
+    p_noisy = tmp_path / "cx_coeff_0000.h5"
+    p_clean = tmp_path / "cx_coeff_clean_0000.h5"
+    with h5py.File(p_clean, "r") as f:
+        assert not bool(f["config"].attrs["has_coords"])
+        assert "band" not in f["coord"] and "coord_digest" in f["coord"]
+    assert p_clean.stat().st_size < p_noisy.stat().st_size
+
+    # swap in a clean shard built from DIFFERENT coords: same row counts, so only
+    # the digest can catch it
+    other = tmp_path / "other"; other.mkdir()
+    _write_pair(other, [0, 1, 2], seed=99)
+    import shutil
+    shutil.copy(other / "cx_coeff_clean_0000.h5", p_clean)
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff", "coeff_clean"))
+    with pytest.raises(ValueError, match="coord_digest mismatch|not co-supported"):
+        ds.get_data(0)
+
+
+def test_clean_only_modality_reports_the_dependency(tmp_path):
+    """A values-only target cannot be read alone — say so, rather than yielding
+    rows with no coords."""
+    _write_pair(tmp_path, [0, 1], seed=4)
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff_clean",))
+    with pytest.raises(ValueError, match="cannot be read alone"):
+        ds.get_data(0)
+
+
+def test_writer_rejects_a_shard_helix_would_refuse(tmp_path):
+    """pimm-data's writer must reject anything helix's reader rejects, or the
+    cross-repo contract is enforced in one direction only."""
+    rng = np.random.default_rng(0)
+    ev = [_ev(rng, 0)]
+    kw = dict(band_lengths=BAND_LENGTHS, gids=GIDS, n_wires=N_WIRES, dataset_name="x")
+    with pytest.raises(ValueError, match="basis_digest"):
+        write_coeff_shard(tmp_path / "x_coeff_0000.h5", ev,
+                          basis_attrs={**BASIS_ATTRS, "basis_digest": "deadbeef"}, **kw)
+    with pytest.raises(ValueError, match="not parseable JSON"):
+        write_coeff_shard(tmp_path / "y_coeff_0000.h5", ev,
+                          basis_attrs={**BASIS_ATTRS, "removal_json": "{not json"}, **kw)
+
+
+@pytest.mark.skipif(not os.path.isdir(_HELIX) or not _import_helix(),
+                    reason="helix not importable")
+def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
+    """CoeffTPCDataset -> CoeffTokenize -> Collect -> collate_fn, batch=2.
+
+    Nothing exercised this end to end, which is why two separate defects lived
+    here undetected: `to_fm` was written but never called (so the model's very
+    first access, B["band_id"], raised KeyError), and the canonical Collect
+    recipe in coeff.py's own docstring uses the multi-part `parts=` form, which
+    PREFIXES every key to `coeff_band_id` and breaks the model contract just as
+    surely. The single-part `Collect(part=...)` form is the correct one here.
+
+    `cell`/`slot` are deliberately NOT collected. They are gather indices into
+    the cell grid, so concatenating two events leaves the second event's indices
+    pointing into the first event's cells — and no `_roles` kind rebases an index
+    by another row-space's running count. They are needed only by the `--fused 0`
+    ablation loss; the production loss (`losses_fused`, `--fused` defaults to 1)
+    reads the dense (n_cells, n_slot) grids and per-cell scalars collected here.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    from helix.tokenize import CoeffTokenize
+    from pimm_data.collate import collate_fn
+
+    # a real corpus always carries norm_sigma (build_corpus always writes the
+    # computed table); without it the tokenizer correctly refuses to normalise.
+    ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
+    _write_pair(tmp_path, [0, 1, 2, 3], seed=11, norm_sigma=ns)
+    tok = CoeffTokenize(part="coeff", clean_part="coeff_clean")
+    # offset counts CELLS (the row-space the model's dense grids live in), not
+    # coefficient rows — the bare form otherwise defaults to a 'coord' key that
+    # a tokenized part does not have.
+    collect = dict(type="Collect", part="coeff", keys=(
+        "band_id", "plane_id", "t_phys", "wire_pos", "wirefeat",
+        "inp", "occ", "valid", "tgt"),
+        offset_keys_dict=dict(offset="band_id"))
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff", "coeff_clean"),
+                         transform=[tok, collect])
+
+    # the five keys that were missing entirely are present, and UNPREFIXED
+    one = ds[0]
+    for k in ("band_id", "plane_id", "t_phys", "wire_pos", "wirefeat"):
+        assert k in one, f"{k} missing — the model gathers this by exact name"
+    assert not any(k.startswith("coeff_") for k in one), \
+        "single-part Collect must not prefix; the model uses bare names"
+    assert one["wirefeat"].shape == (one["band_id"].shape[0], 1)
+
+    # and a real DataLoader at batch=2 collates without exploding
+    dl = DataLoader(ds, batch_size=2, num_workers=0, collate_fn=collate_fn)
+    b = next(iter(dl))
+    for k in ("band_id", "plane_id", "t_phys", "wire_pos", "wirefeat", "inp", "occ"):
+        assert k in b
+    # cell-space keys share one row count; the dense (n_cells, n_slot) grids the
+    # PRODUCTION loss (losses_fused) reads line up with the per-cell scalars.
+    n_cells = b["band_id"].shape[0]
+    assert b["plane_id"].shape[0] == n_cells
+    assert b["wirefeat"].shape == (n_cells, 1)
+    assert b["inp"].shape[0] == n_cells and b["occ"].shape[0] == n_cells
+    assert b["valid"].shape == b["inp"].shape
+    # n_cells is deliberately not carried in the batch: post-collate it is just
+    # the cell row count, which is what fm/train.py's mask generator needs.
+    assert n_cells == b["inp"].shape[0]
+
+
+def test_identity_is_source_file_plus_event_not_event_alone(tmp_path):
+    """`/ident/event` is the event's index WITHIN its source file, so it restarts
+    at 0 in every file. A shard that spans more than one source file therefore
+    holds repeated ids — which is exactly what loader mode produces, since it
+    reads a run-wide joint index that crosses file boundaries.
+
+    Keying the id->position map on the event alone silently collapses them: the
+    1000-event pilot came back as 800 joint events, with 20% of the corpus
+    unreachable and no error anywhere. This only appeared once provenance was
+    fixed to record the TRUE per-file event index; the previous fabricated
+    sequential counter was wrong but happened to be unique.
+    """
+    rng = np.random.default_rng(5)
+    # one shard, two source files, event ids 0,1 repeated in BOTH
+    evs = []
+    for src in ("cx_sensor_0000.h5", "cx_sensor_0001.h5"):
+        for ev in (0, 1):
+            e = _ev(rng, ev)
+            e["source_file"] = src
+            e["value"] = e["value"] + (0.0 if src.endswith("0000.h5") else 100.0)
+            evs.append(e)
+    kw = dict(band_lengths=BAND_LENGTHS, gids=GIDS, n_wires=N_WIRES,
+              basis_attrs=BASIS_ATTRS, dataset_name="cx",
+              norm_sigma=np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32))
+    write_coeff_shard(tmp_path / "cx_coeff_0000.h5", evs, **kw)
+    write_coeff_shard(tmp_path / "cx_coeff_clean_0000.h5",
+                      [{**e, "value": e["value"] * 0.5} for e in evs],
+                      coords=False, **kw)
+
+    r = CoeffTPCReader(data_root=str(tmp_path), dataset_name="cx")
+    assert len(r) == 4, f"expected 4 events, got {len(r)} — duplicate ids collapsed"
+    ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
+                         modalities=("coeff", "coeff_clean"))
+    assert len(ds) == 4
+
+    # every event is distinct and correctly paired: the +100 offset identifies
+    # which source file a row came from, so a collapsed id would show up as a
+    # duplicate value block rather than four distinct ones.
+    firsts = sorted(float(ds.get_data(i)["coeff"]["value"][0, 0]) for i in range(4))
+    assert len({round(v, 5) for v in firsts}) == 4, f"events not distinct: {firsts}"
+    for i in range(4):
+        d = ds.get_data(i)
+        np.testing.assert_allclose(d["coeff_clean"]["value"][:, 0],
+                                   d["coeff"]["value"][:, 0] * 0.5, rtol=1e-5)
+
+
+def test_identity_includes_run_so_runs_do_not_collide():
+    """Every detector run restarts shard numbering at *_sensor_0000.h5, so
+    (source_file, event) alone collides across runs — the design doc specifies
+    (run, source_file, event). Same 20%-loss class as the within-shard collision."""
+    from pimm_data.readers.coeff_tpc import _identity_ids
+    src = np.array([b"sim_wire_sensor_0000.h5"] * 3)
+    ev = np.array([0, 1, 2], np.int64)
+    a = _identity_ids(src, ev, run=np.array([b"run_A"] * 3))
+    b = _identity_ids(src, ev, run=np.array([b"run_B"] * 3))
+    assert not set(a.tolist()) & set(b.tolist()), "two runs produced colliding ids"
+    # single-run stays ordered (iteration follows the data, not a hash)
+    # ordering WITHIN a run is preserved (the run sits in the high bits), so the
+    # dataset's index order still follows the data
+    one = _identity_ids(np.array([b"s_0000.h5", b"s_0000.h5", b"s_0001.h5"]),
+                        np.array([0, 1, 0], np.int64), run=np.array([b"r"] * 3))
+    assert list(one) == sorted(one), "within-run ids must stay ordered"
+
+
+def test_reader_rejects_a_shard_with_duplicate_identities(tmp_path):
+    """A shard whose /ident does not uniquely identify its events cannot be
+    indexed — the id->position map keeps one row per duplicate. Fail loudly
+    instead of serving a quietly shorter dataset."""
+    rng = np.random.default_rng(3)
+    evs = []
+    for _ in range(2):                       # SAME (run, source_file, event) twice
+        e = _ev(rng, 7)
+        e["source_file"] = "cx_sensor_0000.h5"
+        evs.append(e)
+    write_coeff_shard(tmp_path / "cx_coeff_0000.h5", evs, band_lengths=BAND_LENGTHS,
+                      gids=GIDS, n_wires=N_WIRES, basis_attrs=BASIS_ATTRS,
+                      dataset_name="cx")
+    with pytest.raises(ValueError, match="does not uniquely identify"):
+        CoeffTPCReader(data_root=str(tmp_path), dataset_name="cx")
+
+
+def test_corpus_verifier_catches_cross_shard_damage(tmp_path):
+    """audit_shard is per-file and structurally cannot see these. Each one leaves
+    every individual shard valid while silently changing how much data the corpus
+    holds — which is exactly what an OOM-killed build produced."""
+    from pimm_data.coeff_verify import verify_corpus
+    ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
+    for k, ids in enumerate(([0, 1], [2, 3], [4, 5])):
+        _write_pair(tmp_path, ids, file_index=k, norm_sigma=ns, seed=k)
+    assert verify_corpus(str(tmp_path), "cx", expect_events=6) == []
+
+    # 1. a job died after writing only its noisy shard
+    (tmp_path / "cx_coeff_clean_0001.h5").unlink()
+    probs = verify_corpus(str(tmp_path), "cx")
+    assert any("no coeff_clean pair" in p for p in probs), probs
+
+    # 2. a shard missing from the middle of the run
+    (tmp_path / "cx_coeff_0001.h5").unlink()
+    assert any("file_index gap" in p for p in verify_corpus(str(tmp_path), "cx")), \
+        verify_corpus(str(tmp_path), "cx")
+
+    # 3. shards disagreeing on the frozen table
+    other = tmp_path / "other"; other.mkdir()
+    _write_pair(other, [0, 1], file_index=0, norm_sigma=ns, seed=9)
+    _write_pair(other, [2, 3], file_index=1,
+                norm_sigma=np.full_like(ns, 9.0), seed=9)
+    assert any("norm_sigma" in p for p in verify_corpus(str(other), "cx")), \
+        verify_corpus(str(other), "cx")
+
+    # 4. overlapping --event-start ranges duplicating events across shards
+    dup = tmp_path / "dup"; dup.mkdir()
+    _write_pair(dup, [0, 1, 2], file_index=0, norm_sigma=ns, seed=4)
+    _write_pair(dup, [2, 3, 4], file_index=1, norm_sigma=ns, seed=4)   # 2 repeats
+    assert any("more than once" in p for p in verify_corpus(str(dup), "cx")), \
+        verify_corpus(str(dup), "cx")
