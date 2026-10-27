@@ -79,10 +79,19 @@ def _make_supera(hits_path, out_path, seed=0):
                              'ke_sum'), rng.normal(size=(7, 2)) * 100):
                 inter[c].extend(v)
             i_off.append(i_off[-1] + 2)
+            # owner is a function of the group's track (as in pysupera);
+            # some groups of an owned track stay unowned (out of window)
+            vks = sorted(x for x in hi[k] if x.startswith('volume_'))
+            tracks = np.unique(np.concatenate(
+                [hi[k][vk]['group_to_track'][:] for vk in vks]))
+            owner = dict(zip(tracks.tolist(),
+                             rng.integers(-1, 6, size=len(tracks)).tolist()))
             base = 0
-            for vk in sorted(x for x in hi[k] if x.startswith('volume_')):
-                n_g = len(hi[k][vk]['group_to_track'])
-                own = rng.integers(-1, 6, size=n_g)
+            for vk in vks:
+                g2t = hi[k][vk]['group_to_track'][:]
+                n_g = len(g2t)
+                own = np.array([owner[int(t)] for t in g2t])
+                own[rng.random(n_g) < 0.1] = -1
                 own[0] = -1
                 frag_ids.extend(np.where(own >= 0, ids[np.maximum(own, 0)], -1))
                 v_off.append(base)
@@ -150,10 +159,15 @@ def test_rows_point_where_the_ids_pointed(built):
                 np.testing.assert_array_equal(
                     back(ev['particle'][name][:]),
                     su[f'particles/{src}'][off[e]:off[e + 1]])
-            got = np.concatenate([back(ev[f'volume_{v}/group_fragment'][:])
+            # every owned group's fragment is its track's
+            g2t = np.concatenate([ev[f'volume_{v}/group_track'][:]
                                   for v in range(2)])
+            gf = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
+            tid, tf = ev['track/id'][:], back(ev['track/fragment'][:])
+            assert np.all(np.diff(tid) > 0)
             np.testing.assert_array_equal(
-                got, su['groups/fragment_id'][g_off[e]:g_off[e + 1]])
+                tf[np.searchsorted(tid, g2t[gf >= 0])], gf[gf >= 0])
+            assert set(tid) == set(g2t[gf >= 0])
 
 
 def test_dataset_labels_match_supera(built):
@@ -176,11 +190,19 @@ def test_dataset_labels_match_supera(built):
             pdg = su['particles/pdg'][off[e]:off[e + 1]]
             gfrag = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
             voff = vo[vi[e]:vi[e + 1]]
+            # a group's fragment is its track's owner (from any owned group)
+            t_own = {}
+            for v in range(2):
+                g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
+                gf_v = gfrag[voff[v]:voff[v] + len(g2t_v)]
+                t_own.update(zip(g2t_v[gf_v >= 0].tolist(),
+                                 gf_v[gf_v >= 0].tolist()))
             # expected per deposit, volume by volume (step concatenates them)
             exp_f, exp_m, exp_i, exp_p = [], [], [], []
             for v in range(2):
                 d2g = hi[f'entry_{e:06d}/volume_{v}/deposit_to_group'][:]
-                fid = gfrag[d2g + voff[v]]
+                g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
+                fid = np.array([t_own.get(int(t), -1) for t in g2t_v[d2g]])
                 fr = np.array([row_of.get(int(i), -1) for i in fid])
                 inst = np.array([row_of[int(finst[r])] if r >= 0 else -1
                                  for r in fr])
@@ -219,7 +241,10 @@ def test_dataset_labels_match_supera(built):
                     h['group'] >= 0, g['fragment'][h['group']], -1))
             g2t = np.concatenate([hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
                                   for v in range(2)])
-            np.testing.assert_array_equal(g['track'], g2t)
+            seen = g['track'] >= 0
+            np.testing.assert_array_equal(
+                x['track']['id'][g['track'][seen]], g2t[seen])
+            assert not set(g2t[~seen]) & set(x['track']['id'])
             # step and hits carry nothing above the group
             for part in (s, h):
                 assert not {'track', 'fragment', 'deposit_to_track'} & set(part)

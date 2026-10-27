@@ -20,7 +20,8 @@ A ``supera-labl`` file (``/config.attrs['labl_format']``, written by
 :mod:`pimm_data.supera_labl`) is read whole instead, as nested tables::
 
     {'particle': {col: (P,…)}, 'interaction': {col: (I,…)},
-     'v{N}': {'group_fragment': (G_v,), 'deposit_to_group': (N_v,)}}
+     'track': {'id': (T,), 'fragment': (T,)},
+     'v{N}': {'group_track': (G_v,), 'deposit_to_group': (N_v,)}}
 
 ``reader.kind`` says which: ``'supera'`` or ``'track'``.
 """

@@ -1,16 +1,20 @@
 """Write a JAXTPC ``labl`` file from one pysupera (format 4.x) output.
 
-The label of a deposit or a hit is the label of its JAXTPC *group*: pysupera
-records, per group, the fragment that owns it (``groups/fragment_id``), and
-every other label is a property of that fragment, its instance or its
-interaction. The sensor is the summed readout and carries no labels. So a
-``labl`` file holds two things per event:
+The label of a deposit or a hit is the label of its JAXTPC *group*, and a
+group belongs to one Geant4 track. pysupera records, per group, the fragment
+that owns it (``groups/fragment_id``); that owner is a function of the group's
+track (no exception in 1M), so ``labl`` stores the hierarchy once, as maps:
 
-* per volume, ``group_fragment`` — the particle row owning each group — plus
-  copies of the JAXTPC ``deposit_to_group`` and ``group_to_track`` (as
-  ``group_track``), so step+labl needs no hits file: the Geant4 track of a
-  group is also the one identity shared by the wire and pixel partitions;
-* the ``particle`` and ``interaction`` tables those rows index;
+    group -> track -> fragment -> instance -> interaction
+
+* per volume, copies of the JAXTPC ``deposit_to_group`` and
+  ``group_to_track`` (as ``group_track``), so step+labl needs no hits file;
+* ``track``: each visible Geant4 track (``id``, sorted) and the ``fragment``
+  row that owns it. A particle row is not enough: a quarter to a third of
+  visible tracks have none (merged into another fragment), and a merged delta
+  ray's own row is not its owner;
+* the ``particle`` table (fragment -> instance -> interaction, and the rest of
+  each row) and the ``interaction`` table;
 * given the step and sensor files, ``deposit_in_window`` per volume: whether
   the deposit's charge arrives inside the readout window. An unowned group is
   either out of the window or under threshold, and only this tells them apart.
@@ -240,6 +244,7 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 raise ValueError(f'{key}: {len(voffs)} pysupera volumes, '
                                  f'{n_vol} in hits')
             bounds = list(voffs) + [len(gfrag)]
+            own_t, own_f = [], []
             for v in range(n_vol):
                 hv = hev[f'volume_{v}']
                 gv = gfrag[int(bounds[v]):int(bounds[v + 1])]
@@ -248,8 +253,10 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                     raise ValueError(
                         f'{key}/volume_{v}: {len(gv)} groups in pysupera, '
                         f'{n_groups} in hits')
+                g2t = hv['group_to_track'][:]
+                own_t.append(g2t[gv >= 0])
+                own_f.append(gv[gv >= 0])
                 ov = oev.create_group(f'volume_{v}')
-                _create(ov, 'group_fragment', gv, comp)
                 _create(ov, 'deposit_to_group',
                         hv['deposit_to_group'][:].astype(np.int32), comp)
                 _create(ov, 'group_track',
@@ -263,6 +270,17 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                                          f'deposit counts differ')
                     _create(ov, 'deposit_in_window',
                             _in_window(sv, win['anode'][v], win), comp)
+
+            # track -> owning fragment, from the owned groups of every volume
+            own_t = np.concatenate(own_t).astype(np.int64)
+            own_f = np.concatenate(own_f)
+            tid, first = np.unique(own_t, return_index=True)
+            tfrag = own_f[first]
+            if not np.array_equal(own_f, tfrag[np.searchsorted(tid, own_t)]):
+                raise ValueError(f'{key}: a track owned by two fragments')
+            ot = oev.create_group('track')
+            _create(ot, 'id', tid.astype(np.int32), comp)
+            _create(ot, 'fragment', tfrag.astype(np.int32), comp)
 
             op = oev.create_group('particle')
             for name, src in ID_COLUMNS:

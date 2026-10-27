@@ -581,14 +581,15 @@ class JAXTPCDataset(ShardEventDataset):
         per deposit / hit entry. The group is the correspondence key the two
         share, so it exists without labl too (the matching regime: hits gives
         both ``deposit_to_group`` and the entries' group ids). Everything from
-        the group up — its Geant4 track id, its owning fragment, the particle
-        and interaction tables — comes from labl alone.
+        the group up — its Geant4 track, the track's owning fragment, the
+        particle and interaction tables — comes from labl alone.
 
         ``group`` — one row per JAXTPC group, event-wide (each volume's local
         ids are offset by the group counts of the volumes before it, as
         pysupera does, since a particle can cross volumes): ``volume``,
-        ``track`` (Geant4 track id, labl's ``group_track``) and ``fragment``
-        (ref -> ``particle``). ``step.group`` / ``hits.group`` reference it;
+        ``track`` (ref -> ``track``, labl's visible tracks; -1 if the readout
+        saw none of it) and ``fragment`` (ref -> ``particle``: the track's
+        owner, gathered here so every walk starts ``group.fragment``). ``step.group`` / ``hits.group`` reference it;
         ``step.qs`` is the deposit's share of its group's step charge (derived
         here; it is what JAXTPC stores as ``qs_fractions``). ``particle`` and
         ``interaction`` are the labl tables with their row references
@@ -600,9 +601,8 @@ class JAXTPCDataset(ShardEventDataset):
             for k, vd in supera.items():
                 if k.startswith('v'):
                     per_vol[int(k[1:])] = dict(
-                        n=len(vd['group_fragment']),
-                        fragment=vd['group_fragment'],
-                        track=vd.get('group_track'),
+                        n=len(vd['group_track']),
+                        track=vd['group_track'],
                         d2g=vd.get('deposit_to_group'),
                         inw=vd.get('deposit_in_window'))
         if hits_raw is not None:
@@ -636,10 +636,21 @@ class JAXTPCDataset(ShardEventDataset):
                      [np.full(per_vol[v]['n'], v, np.int32) for v in vols]),
                  '_roles': {}}
         if supera is not None:
-            # everything above the group comes from labl only
-            group['track'] = cat('track', np.int32)
-            group['fragment'] = cat('fragment', np.int32)
-            group['_roles']['fragment'] = ('ref', 'particle')
+            # everything above the group comes from labl only: group -> track
+            # (Geant4 id -> visible-track row) -> owning fragment
+            trk = supera['track']
+            tid = np.asarray(trk['id'], np.int64)
+            g2t = cat('track', np.int64)
+            row = np.full(len(g2t), -1, np.int32)
+            if len(tid):
+                pos = np.minimum(np.searchsorted(tid, g2t), len(tid) - 1)
+                row = np.where(tid[pos] == g2t, pos, -1).astype(np.int32)
+            group['track'] = row
+            group['fragment'] = _resolve._take(trk['fragment'], row, -1) \
+                .astype(np.int32)
+            group['_roles'].update(track=('ref', 'track'),
+                                   fragment=('ref', 'particle'))
+            data['track'] = dict(trk, _roles={'fragment': ('ref', 'particle')})
         data['group'] = group
 
         if 'step' in data and 'volume_id' in data['step']:
