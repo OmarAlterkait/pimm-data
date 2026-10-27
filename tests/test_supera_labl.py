@@ -20,6 +20,47 @@ from pimm_data.testing import make_jaxtpc_sample
 from _format2_helpers import ID_BASE, N_EVENTS, _to_format2
 
 TASK = 'jaxtpc_wire_j000000-000004'
+N_TRACKS = 64            # > every synthetic group_to_track value
+VISIBLE_VERTICES = [1, 2]
+_TRACK_DT = np.dtype([(c, '<f4') for c in (
+    'x', 'y', 'z', 't', 'px', 'py', 'pz', 'ke', 'end_x', 'end_y', 'end_z',
+    'end_t', 'end_px', 'end_py', 'end_pz', 'end_ke')] + [(c, '<i4') for c in (
+        'track_id', 'parent_track_id', 'ancestor_track_id', 'pdg')] + [
+    ('mass', '<f4')] + [(c, '<i4') for c in (
+        'proc_start', 'subproc_start', 'proc_end', 'subproc_end')])
+_VERT_DT = np.dtype([(c, '<f4') for c in ('x', 'y', 'z', 't', 'energy_sum',
+                                          'ke_sum')]
+                    + [('num_particles', '<i4'), ('interaction_id', '<i4')])
+_PRIM_DT = np.dtype([('track_id', '<i4'), ('interaction_id', '<i4')])
+
+
+def _make_edepsim(path, n_events, seed=1):
+    """Tracks 0 and 1 are primaries of vertices 1 and 2; the rest descend
+    from them. Vertex 0 has no tracks (nothing the readout could see)."""
+    rng = np.random.default_rng(seed)
+    with h5py.File(path, 'w') as f:
+        for name, dt in (('particle/geant4', _TRACK_DT),
+                         ('vertex/geant4', _VERT_DT),
+                         ('primary/geant4', _PRIM_DT)):
+            f.create_dataset(name, (n_events,), dtype=h5py.vlen_dtype(dt))
+        for e in range(n_events):
+            t = np.zeros(N_TRACKS, _TRACK_DT)
+            for c in _TRACK_DT.names:
+                if _TRACK_DT[c].kind == 'f':
+                    t[c] = rng.normal(size=N_TRACKS) * 100
+            t['track_id'] = np.arange(N_TRACKS)
+            anc = np.where(np.arange(N_TRACKS) % 2 == 0, 0, 1)
+            t['ancestor_track_id'] = anc
+            t['parent_track_id'] = np.where(np.arange(N_TRACKS) < 2, -1, anc)
+            t['pdg'] = 13
+            v = np.zeros(3, _VERT_DT)
+            v['interaction_id'] = np.arange(3)
+            v['x'] = [10.0, 20.0, 30.0]
+            p = np.array([(0, 1), (1, 2)], _PRIM_DT)
+            f['particle/geant4'][e] = t
+            f['vertex/geant4'][e] = v
+            f['primary/geant4'][e] = p
+    return path
 # (pdg, sem_type) of fragment rows; rows 0..2 head instances
 FRAGMENTS = [(13, 2), (22, 1), (2212, 5), (11, 3), (11, 4), (321, 2)]
 EXPECT_MOTIF = {2: 1, 1: 0, 5: 4, 3: 3, 4: 2}
@@ -75,9 +116,11 @@ def _make_supera(hits_path, out_path, seed=0):
             for c in kin:
                 kin[c].append(rng.normal(size=(7, 4)) * 100)
             p_off.append(p_off[-1] + 7)
-            for c, v in zip(('x', 'y', 'z', 'time', 'vertex_id', 'energy_sum',
-                             'ke_sum'), rng.normal(size=(7, 2)) * 100):
+            for c, v in zip(('x', 'y', 'z', 'time', 'energy_sum', 'ke_sum'),
+                            rng.normal(size=(6, 2)) * 100):
                 inter[c].extend(v)
+            # pysupera keeps vertices 1 and 2 of edep-sim's 3 (0 unseen)
+            inter['vertex_id'].extend(VISIBLE_VERTICES)
             i_off.append(i_off[-1] + 2)
             base = 0
             for vk in sorted(x for x in hi[k] if x.startswith('volume_')):
@@ -99,6 +142,11 @@ def _make_supera(hits_path, out_path, seed=0):
         ev['event_id'] = np.array(event_ids, np.int64)
         ev['job_id'] = np.zeros(len(entries), np.int64)
         ev['job_event'] = np.arange(len(entries), dtype=np.int64)
+        ev['input'] = np.zeros(len(entries), np.int32)
+        ev['input_event'] = np.arange(len(entries), dtype=np.int64)
+        f['inputs/edepsim'] = np.array(
+            [_make_edepsim(out_path + '.edepsim.h5', len(entries))],
+            dtype=h5py.string_dtype())
         g = f.create_group('groups')
         g['fragment_id'] = np.array(frag_ids, np.int32)
         g['is_le'] = np.zeros(len(frag_ids), np.int8)
@@ -112,7 +160,7 @@ def _make_supera(hits_path, out_path, seed=0):
             p[c] = np.concatenate(v)
         i = f.create_group('inter')
         for c, v in inter.items():
-            i[c] = np.array(v, np.float32)
+            i[c] = np.array(v, np.int32 if c == 'vertex_id' else np.float32)
         i['offsets'] = np.array(i_off, np.int64)
         i['reaction'] = np.array([b''] * len(inter['x']), dtype=object)
     return out_path
@@ -294,7 +342,7 @@ def test_refs_shift_through_collate_and_split(built):
                        modalities=('step',))
     pipe = Compose([dict(type='Collect', parts={
         'step': dict(keys=('coord', 'group')),
-        'group': dict(keys=('fragment', 'track'),
+        'group': dict(keys=('fragment', 'volume'),
                       offset_keys_dict=dict(offset='fragment')),
         'particle': dict(keys=('pdg', 'fragment_instance'),
                          offset_keys_dict=dict(offset='pdg')),
@@ -334,3 +382,46 @@ def test_qs_is_derived_from_step_charge(built):
     assert np.allclose(sums[np.unique(g[ok])], 1.0, atol=1e-5)
     tot = np.bincount(g[ok], weights=q[ok])
     np.testing.assert_allclose(qs[ok], q[ok] / tot[g[ok]], rtol=1e-5)
+
+
+def test_track_and_interaction_tables_are_complete(built):
+    """track = every Geant4 track, interaction = every vertex (incl. the one
+    pysupera dropped); pysupera's interaction rows are mapped to vertex rows."""
+    root, supera, _, labl, files = built
+    with h5py.File(supera) as su, h5py.File(labl) as lb:
+        off = su['events/offsets'][:]
+        ev = lb['entry_000000']
+        assert len(ev['interaction/x']) == 3
+        assert len(ev['track/pdg']) == N_TRACKS
+        pint = su['particles/interaction_id'][off[0]:off[1]]
+        np.testing.assert_array_equal(
+            ev['particle/interaction'][:],
+            np.array(VISIBLE_VERTICES)[pint])
+        # track -> interaction through its primary ancestor
+        np.testing.assert_array_equal(
+            ev['track/interaction'][:],
+            np.where(np.arange(N_TRACKS) % 2 == 0, 1, 2))
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+                       modalities=('step',))
+    x = ds.get_data(0)
+    s = x['step']
+    # vertex follows particle -> interaction (now a vertex row): x = 20 or 30
+    inst = s['instance_particle'][:, 0]
+    assert set(np.unique(s['vertex'][inst >= 0, 0])) <= {20.0, 30.0}
+    assert x['group']['_roles']['track'] == ('ref', 'track')
+    assert x['track']['_roles']['interaction'] == ('ref', 'interaction')
+
+
+def test_groups_without_labl_for_matching(built):
+    """No labl: step and hits still share the group key (the matching
+    regime), and nothing above the group appears."""
+    root, _, _, _, files = built
+    files = {m: f for m, f in files.items() if m != 'labl'}
+    ds = JAXTPCDataset(data_root=root, files=files,
+                       modalities=('step', 'hits'))
+    x = ds.get_data(0)
+    assert set(x['group']) == {'volume', '_roles'}
+    for part in ('step', 'hits'):
+        assert x[part]['_roles']['group'] == ('ref', 'group')
+        assert 'segment' not in x[part]
+    assert not {'particle', 'track', 'interaction'} & set(x)

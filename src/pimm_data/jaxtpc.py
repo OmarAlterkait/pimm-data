@@ -575,12 +575,14 @@ class JAXTPCDataset(ShardEventDataset):
     # ------------------------------------------------------------------
 
     def _build_relations(self, data, supera, hits_raw):
-        """Parts and references from a supera labl (hits only cross-check it).
+        """Parts and references (docs/LABELS.md).
 
         Step and hits carry nothing above the group: one ``group`` reference
-        per deposit / hit entry. Everything from the group up — its Geant4
-        track, its owning fragment, the particle and interaction tables — comes
-        from labl.
+        per deposit / hit entry. The group is the correspondence key the two
+        share, so it exists without labl too (the matching regime: hits gives
+        both ``deposit_to_group`` and the entries' group ids). Everything from
+        the group up — its Geant4 track, its owning fragment, the track,
+        particle and interaction tables — comes from labl alone.
 
         ``group`` — one row per JAXTPC group, event-wide (each volume's local
         ids are offset by the group counts of the volumes before it, as
@@ -591,10 +593,7 @@ class JAXTPCDataset(ShardEventDataset):
         here; it is what JAXTPC stores as ``qs_fractions``). ``particle`` and
         ``interaction`` are the labl tables with their row references
         declared. Hits only cross-check group counts."""
-        if supera is None:
-            # Everything above the group is labl's (docs/LABELS.md): with no
-            # labl there is no group part to reference. (Legacy track-labl
-            # data keeps its group_to_track in ``bridges``.)
+        if supera is None and hits_raw is None:
             return
         per_vol = {}       # v -> dict(n, track, fragment, d2g)
         if supera is not None:
@@ -610,6 +609,8 @@ class JAXTPCDataset(ShardEventDataset):
                 if not k.startswith('group_to_track_v'):
                     continue
                 v = int(k.rsplit('_v', 1)[1])
+                if supera is not None and v not in per_vol:
+                    continue
                 d = per_vol.setdefault(v, dict(n=len(g2t)))
                 if d['n'] != len(g2t):
                     raise ValueError(
@@ -632,10 +633,13 @@ class JAXTPCDataset(ShardEventDataset):
              is not None else np.full(per_vol[v]['n'], -1, dt) for v in vols])
         group = {'volume': np.concatenate(
                      [np.full(per_vol[v]['n'], v, np.int32) for v in vols]),
-                 'track': cat('track', np.int32), '_roles': {}}
+                 '_roles': {}}
         if supera is not None:
+            # everything above the group comes from labl only
+            group['track'] = cat('track', np.int32)
             group['fragment'] = cat('fragment', np.int32)
-            group['_roles']['fragment'] = ('ref', 'particle')
+            group['_roles'].update(track=('ref', 'track'),
+                                   fragment=('ref', 'particle'))
         data['group'] = group
 
         if 'step' in data and 'volume_id' in data['step']:
@@ -683,8 +687,15 @@ class JAXTPCDataset(ShardEventDataset):
             part['_roles'] = {c: ('ref', 'particle') for c in (
                 'fragment', 'instance', 'fragment_instance', 'fragment_parent',
                 'instance_parent', 'parent', 'ancestor') if c in part}
-            part['_roles']['interaction'] = ('ref', 'interaction')
+            part['_roles'].update(interaction=('ref', 'interaction'),
+                                  track=('ref', 'track'))
             data['particle'] = part
+            if 'track' in supera:
+                trk = dict(supera['track'])
+                trk['_roles'] = {'parent': ('ref', 'track'),
+                                 'ancestor': ('ref', 'track'),
+                                 'interaction': ('ref', 'interaction')}
+                data['track'] = trk
             data['interaction'] = dict(supera.get('interaction', {}),
                                        _roles={})
 

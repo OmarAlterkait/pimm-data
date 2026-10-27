@@ -26,6 +26,20 @@ Grouping is identical between the wire and pixel runs: step, `deposit_to_group` 
 `group_to_track` are byte-identical. Ownership differs by readout, because pysupera
 partitions wire on deposits and pixel on hits. So there is one `labl` per readout.
 
+## Three regimes, each self-sufficient
+
+| given | can train | through |
+|---|---|---|
+| step / hits / sensor + `labl` | supervised | `step.group` / `hits.group` → `labl` |
+| step / hits / sensor, no `labl` | self-supervised | the point files alone |
+| step + hits, no `labl` | matching | `step.group` == `hits.group`, weighted by `step.qs` |
+
+The group is the correspondence key that step and hits share. It is not a
+label, so pimm-data exposes it (`step.group`, `hits.group` → a `group` part)
+whenever hits is loaded, with or without `labl`. Every truth above the group
+(track, fragment, instance, PDG, kinematics, interaction) is in `labl` and
+nowhere else.
+
 ## What lives where
 
 The rule: **a point file carries nothing above the group.** Step carries
@@ -56,7 +70,14 @@ ordering (1M task 0, verified):
 
 The partition into tracks (not the ids or PDGs) can therefore be read from
 step or hits without `labl`. Explicitly, hits also carries `group_to_track`.
-Keeping track information in `labl` alone means a release-time step:
+Why it matters: without `labl`, the group correspondence should be the only
+truth a model can use. Ordering gives away more:
+- runs of consecutive group ids are whole tracks;
+- step rows trace each track's trajectory in order.
+
+A self-supervised or matching model, or a baseline that uses point order, could
+then recover track membership by index arithmetic. Its "label-free" result
+would not be. Keeping track information in `labl` alone means a release-time step:
 - drop `group_to_track` from hits;
 - renumber groups and permute step rows by one random per-event permutation,
   applied consistently to step, hits' group ids and `labl`.
@@ -114,44 +135,36 @@ entry_NNNNNN/
     group_fragment    (G_v,) int32   particle row owning group g (1-based groups;
                                      slot 0 and unowned groups = -1)
                                      <- groups/fragment_id, split by volume_offsets
+    group_track       (G_v,) int32   track row of group g (hits group_to_track;
+                                     edep-sim track ids are its rows)
     deposit_to_group  (N_v,) int32   copy from hits; the step -> group bridge
-    group_track       (G_v,) int32   copy of hits group_to_track (Geant4 track)
-  particle/           (P rows)
-  interaction/        (I rows)
+  particle/   (P rows)  pysupera fragments/instances (+ track, interaction refs)
+  track/      (T rows)  every Geant4 track       <- edep-sim particle/geant4
+  interaction/(I rows)  every vertex             <- edep-sim vertex/geant4
 ```
+
+`track` holds `pdg`, `mass`, `parent`, `ancestor` (rows; -1 for a primary),
+`interaction` (its primary ancestor's vertex), `start_pos`/`end_pos` (x, y, z,
+t), `start_mom`/`end_mom` (px, py, pz), `start_ke`/`end_ke`, and Geant4
+`proc_*`/`subproc_*`. Units are mm, ns and MeV, as edep-sim writes them.
+
+`interaction` holds `x`, `y`, `z`, `time`, `energy_sum`, `ke_sum` and
+`num_particles`, plus `generator`/`reaction` once the generator fills them.
+pysupera keeps only vertices a stored particle references (18 of 21 in 1M event
+0), and so drops exactly the unseen ones. Its renumbered rows are mapped back
+through `vertex_id`.
+
+`particle` drops `mass`, `start_*` and Geant4 parentage, which are now reached
+through `particle.track`. It keeps `end_*`, because pysupera corrects a
+converting photon's end momentum, and `first_*`/`last_*`, which are its own.
+
+Size, wire, 1M task 0: about 1.2 MB/event (track table 680 KB, particle 350
+KB, group maps 200 KB). Writing takes about 4 minutes per 1000-event task.
 
 `deposit_to_group` is the one non-pysupera array. Step+labl must work without hits,
 and the step file does not carry it. The alternative is for JAXTPC to write it into
 step, since grouping is a step property and readout-independent; that change is not
 ours to make.
-
-### `particle/` — kept columns
-
-All id-valued columns are converted to row indices within the event (`-1` = none).
-That is a reindex, not a computation; pysupera ids are never needed downstream.
-
-| column | from pysupera | why |
-|---|---|---|
-| `fragment` | `frag_id` | own row if this row heads a fragment, else -1 |
-| `instance` | `inst_id` | own row if this row heads an instance, else -1 |
-| `fragment_instance` | `frag_inst_id` | instance labels: group → fragment → instance |
-| `fragment_parent`, `instance_parent` | `frag_parent_id`, `inst_parent_id` | fragment and instance hierarchy |
-| `parent`, `ancestor` | `parent_id`, `ancestor_id` | particle hierarchy; primary ⇔ `parent == row` |
-| `interaction` | `interaction_id` | already a row index into `interaction/` |
-| `pdg` | `pdg` | PID |
-| `sem_type` | `sem_type` | own class; marks merged delta rays (`kDelta` on a non-fragment row) |
-| `fragment_sem_type` | `frag_sem_type` | the semantic class of every point (incl. LE) |
-| `instance_sem_type` | `inst_sem_type` | instance class |
-| `interaction_type` | `interaction_type` | creation process |
-| `geant4_trackid`, `geant4_parent_trackid`, `geant4_parent_pdg` | same | provenance to edep-sim; true parent PDG is not derivable when the parent has no row |
-| `mass` | `mass` | KE = E − mass |
-| `start_pos/mom`, `end_pos/mom` | same | Geant4 creation and destruction, `[x,y,z,t]` mm/ns and `[px,py,pz,E]` MeV |
-| `first_pos/mom`, `last_pos/mom` | same | instance rows: first/last visible step; `last` NaN for showers; NaN for instances with no visible points |
-
-### `interaction/` — kept columns
-
-`x`, `y`, `z`, `time` (vertex), `vertex_id` (link to the edep-sim vertex list),
-`energy_sum`, `ke_sum`.
 
 ### Dropped, and why
 

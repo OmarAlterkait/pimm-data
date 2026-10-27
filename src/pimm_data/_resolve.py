@@ -92,7 +92,8 @@ def add_vocabulary(data):
     ``particle.pid``      photon 0, electron 1, muon 2, pion 3, proton 4, le 5
     ``particle.is_primary`` the row is its own ``parent``
     ``particle.momentum_start`` / ``momentum_first``  ``|p|`` (MeV/c) at
-                          creation / at the first visible step (NaN if none)
+                          creation (its Geant4 track's) / at the first visible
+                          step (NaN if none)
     ``interaction.vertex`` ``(I, 3)`` x, y, z (mm)
     """
     part = data.get('particle')
@@ -101,9 +102,18 @@ def add_vocabulary(data):
         part['motif'] = motif_of_sem(part['fragment_sem_type'])
         part['pid'] = pid_of(part['pdg'], part['instance_sem_type'])
         part['is_primary'] = (np.asarray(part['parent']) == rows).astype(np.int32)
-        for which in ('start', 'first'):
-            mom = np.asarray(part[f'{which}_mom'], dtype=np.float64)[:, :3]
-            part[f'momentum_{which}'] = np.sqrt((mom ** 2).sum(axis=1)) \
+        # creation momentum is the Geant4 track's; first visible step is
+        # pysupera's own (NaN for an instance with no visible points)
+        trk = data.get('track')
+        if trk is not None and 'track' in part:
+            start = _take(np.asarray(trk['start_mom'], np.float64),
+                          part['track'], np.nan)
+        else:
+            start = np.full((len(rows), 3), np.nan)
+        for which, mom in (('start', start),
+                           ('first', np.asarray(part['first_mom'],
+                                                np.float64)[:, :3])):
+            part[f'momentum_{which}'] = np.sqrt((mom[:, :3] ** 2).sum(axis=1)) \
                 .astype(np.float32)
     inter = data.get('interaction')
     if inter is not None and 'vertex' not in inter \

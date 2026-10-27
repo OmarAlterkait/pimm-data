@@ -64,7 +64,7 @@ def test_row2_ssl_hits(jaxtpc_data_root):
     """hits only — hits cloud + bridges, no labels."""
     ds = make_ds(jaxtpc_data_root, modalities=('hits',))
     d = ds.get_data(0)
-    assert _top_keys(d) == {'hits', 'bridges'}
+    assert _top_keys(d) == {'hits', 'bridges', 'group'}
     _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('instance',))
     assert 'segment' not in d['hits']
     assert 'raw' in d['hits']
@@ -102,7 +102,7 @@ def test_row5_denoising(jaxtpc_data_root):
     """sensor + hits — both clouds in parallel, bridges present, no labels."""
     ds = make_ds(jaxtpc_data_root, modalities=('sensor', 'hits'))
     d = ds.get_data(0)
-    assert _top_keys(d) == {'sensor', 'hits', 'bridges'}
+    assert _top_keys(d) == {'sensor', 'hits', 'bridges', 'group'}
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('instance',))
     assert 'segment' not in d['sensor']
@@ -127,7 +127,7 @@ def test_row7_supervised_hits(jaxtpc_data_root):
     ds = make_ds(jaxtpc_data_root, modalities=('hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'hits', 'labl', 'bridges'}
+    assert _top_keys(d) == {'hits', 'labl', 'bridges', 'group'}
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
     # labl is per-volume
     assert all(vk.startswith('v') for vk in d['labl'])
@@ -156,7 +156,7 @@ def test_row9_2d_end_to_end(jaxtpc_data_root):
                  modalities=('sensor', 'hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'sensor', 'hits', 'labl', 'bridges'}
+    assert _top_keys(d) == {'sensor', 'hits', 'labl', 'bridges', 'group'}
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
     assert 'segment' not in d['sensor']  # sensor never carries labels
@@ -183,7 +183,7 @@ def test_row13_joint_multitask(jaxtpc_data_root):
                  modalities=('step', 'sensor', 'hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'step', 'sensor', 'hits', 'labl', 'bridges'}
+    assert _top_keys(d) == {'step', 'sensor', 'hits', 'labl', 'bridges', 'group'}
     _assert_point_cloud(d['step'], expect_dim=3, labeled=True)
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
