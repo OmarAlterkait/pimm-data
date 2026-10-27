@@ -585,17 +585,18 @@ class JAXTPCDataset(ShardEventDataset):
         ``group`` — one row per JAXTPC group, event-wide (each volume's local
         ids are offset by the group counts of the volumes before it, as
         pysupera does, since a particle can cross volumes): ``volume``,
-        ``track`` (Geant4 track id) and, with a supera labl, ``fragment``
-        (ref -> ``particle``). ``step.group`` / ``hits.group`` reference it
-        (``step.qs`` is the deposit's share of its group's charge, when hits
-        are loaded). ``particle`` and ``interaction`` are the labl tables with
-        their row references declared. Nothing is derived here."""
+        ``track`` (Geant4 track id, labl's ``group_track``) and ``fragment``
+        (ref -> ``particle``). ``step.group`` / ``hits.group`` reference it;
+        ``step.qs`` is the deposit's share of its group's step charge (derived
+        here; it is what JAXTPC stores as ``qs_fractions``). ``particle`` and
+        ``interaction`` are the labl tables with their row references
+        declared. Hits only cross-check group counts."""
         if supera is None:
             # Everything above the group is labl's (docs/LABELS.md): with no
             # labl there is no group part to reference. (Legacy track-labl
             # data keeps its group_to_track in ``bridges``.)
             return
-        per_vol = {}       # v -> dict(n, track, fragment, d2g, qs?)
+        per_vol = {}       # v -> dict(n, track, fragment, d2g)
         if supera is not None:
             for k, vd in supera.items():
                 if k.startswith('v'):
@@ -614,11 +615,9 @@ class JAXTPCDataset(ShardEventDataset):
                     raise ValueError(
                         f"volume {v}: {d['n']} groups in labl, {len(g2t)} in "
                         f"hits — labl and hits are not the same event/task")
-                if d.get('track') is None:     # labl predating group_track
-                    d['track'] = g2t
+                # hits only cross-checks: track identity is labl's alone
                 if d.get('d2g') is None:
                     d['d2g'] = hits_raw.get(f'deposit_to_group_v{v}')
-                d['qs'] = hits_raw.get(f'qs_fractions_v{v}')
         if self._volume is not None:
             per_vol = {v: d for v, d in per_vol.items() if v == self._volume}
         if not per_vol:
@@ -643,7 +642,6 @@ class JAXTPCDataset(ShardEventDataset):
             st = data['step']
             vid = st['volume_id'].ravel()
             ref = np.full(len(vid), -1, np.int32)
-            qs = np.full(len(vid), np.nan, np.float32)
             for v in vols:
                 d2g = per_vol[v].get('d2g')
                 mask = vid == v
@@ -654,11 +652,18 @@ class JAXTPCDataset(ShardEventDataset):
                         f"volume {v}: {len(d2g)} deposit_to_group entries, "
                         f"{int(mask.sum())} step deposits")
                 ref[mask] = np.where(d2g >= 0, d2g + base[v], -1)
-                if per_vol[v].get('qs') is not None:
-                    qs[mask] = per_vol[v]['qs']
             st['group'] = ref
-            if not np.isnan(qs).all():
-                st['qs'] = qs[:, None]
+            if 'charge' in st:
+                # A deposit's share of its group's recombined charge — JAXTPC's
+                # qs_fractions, which is exactly this (to float16): a step
+                # quantity, the weight that splits a hit's charge over the
+                # deposits of its group. Derived, so no file needs to carry it.
+                q = st['charge'][:, 0].astype(np.float64)
+                tot = np.bincount(np.maximum(ref, 0), weights=np.where(
+                    ref >= 0, q, 0.0), minlength=len(group['volume']))
+                st['qs'] = np.where(ref >= 0, q / np.maximum(
+                    tot[np.maximum(ref, 0)], 1e-30), np.nan) \
+                    .astype(np.float32)[:, None]
             st.setdefault('_roles', {})['group'] = ('ref', 'group')
 
         if 'hits' in data:

@@ -319,3 +319,18 @@ def test_refs_shift_through_collate_and_split(built):
     np.testing.assert_array_equal(frag, exp)
     one = split_event(b, 1)
     np.testing.assert_array_equal(one['step_group'].numpy(), raw1)
+
+
+def test_qs_is_derived_from_step_charge(built):
+    """step.qs is each deposit's share of its group's step charge; it sums to
+    one per group and needs nothing from the hits file."""
+    root, _, _, _, files = built
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+                       modalities=('step',))
+    s = ds.get_data(0)['step']
+    g, qs, q = s['group'], s['qs'][:, 0], s['charge'][:, 0]
+    ok = g >= 0
+    sums = np.bincount(g[ok], weights=qs[ok])
+    assert np.allclose(sums[np.unique(g[ok])], 1.0, atol=1e-5)
+    tot = np.bincount(g[ok], weights=q[ok])
+    np.testing.assert_allclose(qs[ok], q[ok] / tot[g[ok]], rtol=1e-5)

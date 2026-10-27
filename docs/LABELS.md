@@ -41,6 +41,28 @@ hits+labl are each complete.
   `labl` drops its copy.
 - `group_to_track` belongs in `labl`; hits keeps it only for older data.
 
+`qs_fractions` is not a hits quantity. It is a deposit's share of its group's
+recombined step charge (JAXTPC `compute_qs_fractions`), and it equals
+`charge / group-sum(charge)` from the step file to float16 precision. It is the
+weight that splits a hit's charge over its group's deposits. It is derivable,
+so pimm-data computes it as `step.qs`, and no file needs to carry it.
+
+**Track information is implicit in today's point files.** It shows in their
+ordering (1M task 0, verified):
+- JAXTPC numbers groups in track-id order, so each track's groups are one
+  contiguous run of ids;
+- step rows follow edep-sim's track-sorted step table, so each track's deposits
+  are one contiguous run and `deposit_to_group` is non-decreasing.
+
+The partition into tracks (not the ids or PDGs) can therefore be read from
+step or hits without `labl`. Explicitly, hits also carries `group_to_track`.
+Keeping track information in `labl` alone means a release-time step:
+- drop `group_to_track` from hits;
+- renumber groups and permute step rows by one random per-event permutation,
+  applied consistently to step, hits' group ids and `labl`.
+
+This has to come after pysupera, which relies on the step row order.
+
 Measured (10 events per readout, 1M task 0): every visible Geant4 track lies in
 exactly one fragment and one instance (0 exceptions in about 80k tracks). So
 group → track → instance is a chain of functions too. 26% (wire) and 39% (pixel)
