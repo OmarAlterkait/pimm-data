@@ -37,14 +37,14 @@ partitions wire on deposits and pixel on hits. So there is one `labl` per readou
 The group is the correspondence key that step and hits share. It is not a
 label, so pimm-data exposes it (`step.group`, `hits.group` → a `group` part)
 whenever hits is loaded, with or without `labl`. Every truth above the group
-(track, fragment, instance, PDG, kinematics, interaction) is in `labl` and
+(track id, fragment, instance, PDG, kinematics, interaction) is in `labl` and
 nowhere else.
 
 ## What lives where
 
 The rule: **a point file carries nothing above the group.** Step carries
 deposit → group, and hits carries hit entry → group. Everything from the group
-up lives in `labl`: group → track, group → fragment, the particle and interaction
+up lives in `labl`: group → track id, group → fragment, the particle and interaction
 tables, and the references between them.
 
 On disk today `deposit_to_group` and `group_to_track` sit in the JAXTPC hits file.
@@ -135,31 +135,22 @@ entry_NNNNNN/
     group_fragment    (G_v,) int32   particle row owning group g (1-based groups;
                                      slot 0 and unowned groups = -1)
                                      <- groups/fragment_id, split by volume_offsets
-    group_track       (G_v,) int32   track row of group g (hits group_to_track;
-                                     edep-sim track ids are its rows)
+    group_track       (G_v,) int32   Geant4 track id of group g (hits
+                                     group_to_track); matches particle.geant4_trackid
     deposit_to_group  (N_v,) int32   copy from hits; the step -> group bridge
-  particle/   (P rows)  pysupera fragments/instances (+ track, interaction refs)
-  track/      (T rows)  every Geant4 track       <- edep-sim particle/geant4
-  interaction/(I rows)  every vertex             <- edep-sim vertex/geant4
+  particle/   (P rows)  pysupera particles: fragments/instances, their links,
+                        Geant4 ids, kinematics, interaction ref
+  interaction/(I rows)  pysupera inter/: one row per interaction it kept
 ```
 
-`track` holds `pdg`, `mass`, `parent`, `ancestor` (rows; -1 for a primary),
-`interaction` (its primary ancestor's vertex), `start_pos`/`end_pos` (x, y, z,
-t), `start_mom`/`end_mom` (px, py, pz), `start_ke`/`end_ke`, and Geant4
-`proc_*`/`subproc_*`. Units are mm, ns and MeV, as edep-sim writes them.
+`labl` is what pysupera outputs, curated, and nothing more. It does not reach
+back into edep-sim: tracks and vertices the readout never saw are not part of
+what we label, and anything pysupera adds later is picked up by extending the
+column lists. Interactions are separated by row (`particle.interaction`); which
+generator made each one is pysupera's to add, and `interaction/` gains it then.
 
-`interaction` holds `x`, `y`, `z`, `time`, `energy_sum`, `ke_sum` and
-`num_particles`, plus `generator`/`reaction` once the generator fills them.
-pysupera keeps only vertices a stored particle references (18 of 21 in 1M event
-0), and so drops exactly the unseen ones. Its renumbered rows are mapped back
-through `vertex_id`.
-
-`particle` drops `mass`, `start_*` and Geant4 parentage, which are now reached
-through `particle.track`. It keeps `end_*`, because pysupera corrects a
-converting photon's end momentum, and `first_*`/`last_*`, which are its own.
-
-Size, wire, 1M task 0: about 1.2 MB/event (track table 680 KB, particle 350
-KB, group maps 200 KB). Writing takes about 4 minutes per 1000-event task.
+Size, 1M task 0: about 0.9 MB/event; writing takes about 2 minutes per 1000-event
+task.
 
 `deposit_to_group` is the one non-pysupera array. Step+labl must work without hits,
 and the step file does not carry it. The alternative is for JAXTPC to write it into
@@ -195,7 +186,8 @@ Everything a model or metric uses is a gather; nothing new is stored:
 
 These are exactly the keys pimm's evaluators and heads already read for PILArNet.
 Deposits and hits in unowned groups are -1 everywhere. That is about 10% of wire and
-17% of pixel deposits in 1M, mostly charge outside the readout window.
+17% of pixel deposits in 1M, mostly charge outside the readout window. JAXTPC will
+stop saving out-of-window deposits, so no in/out flag is needed here.
 
 ## Implemented, and checked on real data
 
@@ -206,33 +198,14 @@ On 1M task 0 (20 events per readout), the per-hit labels `JAXTPCDataset` builds 
 - **pixel:** 16 fragment / 2 instance / 4 LE mismatches over 11.9M on-sensor hits,
   all in the majority-resolved straddling groups.
 
-Writing takes about 2 minutes per 1000-event task, and the output is about
-0.8 MB/event (wire). Most of that is the float64 kinematics (about 560 KB),
-kept because pysupera chose float64 to keep slow-nucleus KE. Storing them as
-float32 would halve the file.
-
-Hits carry the JAXTPC group id as `instance_group`, and `instance` becomes the
-particle row.
+Hits and step carry the JAXTPC group id as `group` (a reference into the `group`
+table), and `instance` becomes the particle row.
 
 ## Still needed from producers
 
-1. **Generator source per interaction** (MPV vertex vs MPR single particle). It is
-   not recorded anywhere:
-   - edep-sim's `vertex/geant4` has `generator`, `reaction` and `generator_vertex_id`
-     fields, but DLPGenerator leaves them empty or unset;
-   - pysupera copies `reaction` through `vertex_id`, so `inter/reaction` is empty too.
-
-   It can only be inferred today (checked on 200 events). Vertices are written in
-   generator order, Generator 4 (MPR) always has exactly one particle, and MPV
-   vertices are at t < 1.6 µs while MPR vertices are spread over 0–1.31 ms. A
-   1-particle vertex at t < 1.6 µs is still ambiguous: MPV also makes 1-particle
-   vertices (236 of 1790), and an MPR lands that early about once per 100 events.
-
-   The fix is upstream: DLPGenerator fills `generator` (e.g. `Generator1..4`), and
-   pysupera then carries it next to `reaction`. With that, `interaction/` gains
-   `generator`.
-2. **A doraemon `labl` stage.** It does not exist in the 1M campaign.
-3. **Unchanged from before:** pixel window 0/0, `t0_us` float16, no `in_window` flag.
+1. **A doraemon `labl` stage.** It does not exist in the 1M campaign.
+2. **JAXTPC:** drop out-of-window deposits; write `deposit_to_group` into step.
+3. **pysupera (later):** the generator source per interaction.
 
 ## Open
 

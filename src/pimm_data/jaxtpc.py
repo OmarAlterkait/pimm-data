@@ -581,8 +581,8 @@ class JAXTPCDataset(ShardEventDataset):
         per deposit / hit entry. The group is the correspondence key the two
         share, so it exists without labl too (the matching regime: hits gives
         both ``deposit_to_group`` and the entries' group ids). Everything from
-        the group up — its Geant4 track, its owning fragment, the track,
-        particle and interaction tables — comes from labl alone.
+        the group up — its Geant4 track id, its owning fragment, the particle
+        and interaction tables — comes from labl alone.
 
         ``group`` — one row per JAXTPC group, event-wide (each volume's local
         ids are offset by the group counts of the volumes before it, as
@@ -638,8 +638,7 @@ class JAXTPCDataset(ShardEventDataset):
             # everything above the group comes from labl only
             group['track'] = cat('track', np.int32)
             group['fragment'] = cat('fragment', np.int32)
-            group['_roles'].update(track=('ref', 'track'),
-                                   fragment=('ref', 'particle'))
+            group['_roles']['fragment'] = ('ref', 'particle')
         data['group'] = group
 
         if 'step' in data and 'volume_id' in data['step']:
@@ -687,15 +686,8 @@ class JAXTPCDataset(ShardEventDataset):
             part['_roles'] = {c: ('ref', 'particle') for c in (
                 'fragment', 'instance', 'fragment_instance', 'fragment_parent',
                 'instance_parent', 'parent', 'ancestor') if c in part}
-            part['_roles'].update(interaction=('ref', 'interaction'),
-                                  track=('ref', 'track'))
+            part['_roles']['interaction'] = ('ref', 'interaction')
             data['particle'] = part
-            if 'track' in supera:
-                trk = dict(supera['track'])
-                trk['_roles'] = {'parent': ('ref', 'track'),
-                                 'ancestor': ('ref', 'track'),
-                                 'interaction': ('ref', 'interaction')}
-                data['track'] = trk
             data['interaction'] = dict(supera.get('interaction', {}),
                                        _roles={})
 
