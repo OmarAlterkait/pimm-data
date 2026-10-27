@@ -6,8 +6,10 @@ every other label is a property of that fragment, its instance or its
 interaction. The sensor is the summed readout and carries no labels. So a
 ``labl`` file holds two things per event:
 
-* per volume, ``group_fragment`` — the particle row owning each group — and a
-  copy of the JAXTPC ``deposit_to_group``, so step+labl needs no hits file;
+* per volume, ``group_fragment`` — the particle row owning each group — plus
+  copies of the JAXTPC ``deposit_to_group`` and ``group_to_track`` (as
+  ``group_track``), so step+labl needs no hits file: the Geant4 track of a
+  group is also the one identity shared by the wire and pixel partitions;
 * the ``particle`` and ``interaction`` tables those rows index.
 
 Everything is copied; the one transformation is that pysupera ids (``id``,
@@ -207,6 +209,8 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 _create(ov, 'group_fragment', gv, comp)
                 _create(ov, 'deposit_to_group',
                         hv['deposit_to_group'][:].astype(np.int32), comp)
+                _create(ov, 'group_track',
+                        hv['group_to_track'][:].astype(np.int32), comp)
 
             op = oev.create_group('particle')
             for name, src in ID_COLUMNS:

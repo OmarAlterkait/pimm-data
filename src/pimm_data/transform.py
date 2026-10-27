@@ -63,12 +63,16 @@ def _augment_index_valid_keys(data_dict):
     n_points = coord.shape[0]
     valid = data_dict["index_valid_keys"]
     present = set(valid)
+    # A ('ref', part) column is one row per point (its VALUES index another
+    # part, which a point subsample leaves alone), so it is sliced with them.
+    refs = {k for k, r in (data_dict.get("_roles") or {}).items()
+            if isinstance(r, (tuple, list)) and r and r[0] == "ref"}
     for k in list(data_dict.keys()):
         if k in present or k == "index_valid_keys":
             continue
         is_schema = any(k == p or k.startswith(p + "_")
                         for p in _INDEX_SCHEMA_PREFIXES)
-        if not (is_schema or k in _INDEX_PER_POINT_KEYS):
+        if not (is_schema or k in _INDEX_PER_POINT_KEYS or k in refs):
             continue
         v = data_dict[k]
         if getattr(v, "shape", None) and v.shape[0] == n_points:

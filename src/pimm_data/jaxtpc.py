@@ -47,7 +47,7 @@ import numpy as np
 from .builder import DATASETS
 from ._dataset_base import ShardEventDataset
 from ._label_decorate import gather_with_fill
-from . import _supera_labels
+from . import _resolve
 from .readers.jaxtpc_step import JAXTPCStepReader
 from .readers.jaxtpc_sensor import JAXTPCSensorReader
 from .readers.jaxtpc_labl import JAXTPCLablReader
@@ -89,13 +89,6 @@ def canonical_plane_id(label):
             f"canonical_plane_id: unknown plane type {t!r} in {label!r} "
             f"(expected one of {_PLANE_TYPES} or 'Pixel')")
     return v * len(_PLANE_TYPES) + _PLANE_TYPES.index(t)
-
-
-# label_key -> the named key the bare ``segment`` copies (supera-labl);
-# None = the instance's raw PDG.
-_SUPERA_SEGMENT = {'pdg': None, 'motif': 'segment_motif',
-                   'pid': 'segment_pid', 'particle': 'instance_particle',
-                   'interaction': 'instance_interaction'}
 
 
 @DATASETS.register_module()
@@ -311,10 +304,10 @@ class JAXTPCDataset(ShardEventDataset):
                     raise ValueError(
                         "label_config= is for track labl files; a supera-labl "
                         "file emits every named key itself (docs/LABELS.md).")
-                if label_key not in _SUPERA_SEGMENT:
+                if label_key not in _resolve.SEGMENT_OF_LABEL_KEY:
                     raise ValueError(
                         f"label_key={label_key!r} with a supera-labl file: "
-                        f"use one of {sorted(_SUPERA_SEGMENT)}.")
+                        f"use one of {sorted(_resolve.SEGMENT_OF_LABEL_KEY)}.")
 
         if 'hits' in self._modalities:
             self.hits_reader = JAXTPCHitsReader(
@@ -386,7 +379,6 @@ class JAXTPCDataset(ShardEventDataset):
                 labl_by_volume = {k: v for k, v in labl_by_volume.items()
                                   if not k.startswith('v')
                                   or k == f'v{self._volume}'}
-            data['labl'] = labl_by_volume
         elif self.labl_reader is not None:
             labl_by_volume = self._build_labl(self.labl_reader.read_event(real_idx))
             if self._volume is not None:
@@ -398,6 +390,10 @@ class JAXTPCDataset(ShardEventDataset):
             if labl_by_volume:
                 data['labl'] = labl_by_volume
 
+        supera = labl_by_volume if 'particle' in labl_by_volume else None
+        if supera is not None:
+            labl_by_volume = {}     # supera labels arrive as parts, not here
+        hits_raw = None
         if self.hits_reader is not None:
             hits_raw = self.hits_reader.read_event(real_idx)
             data['hits'] = self._build_hits_cloud(hits_raw, labl_by_volume)
@@ -416,6 +412,11 @@ class JAXTPCDataset(ShardEventDataset):
             data['step'] = self._build_step_cloud(
                 self.step_reader.read_event(real_idx), labl_by_volume)
 
+        self._build_relations(data, supera, hits_raw)
+        if supera is not None:
+            for on in ('step', 'hits'):
+                if on in data:
+                    self._resolve_labels(data, on)
         return data
 
     # ------------------------------------------------------------------
@@ -428,23 +429,7 @@ class JAXTPCDataset(ShardEventDataset):
         for k, v in step_raw.items():
             sub[k] = v  # coord, energy, volume_id, physics — readers emit bare
 
-        if 'particle' in labl_by_volume and 'volume_id' in sub:
-            vid = sub['volume_id'].ravel()
-            frag = np.full(len(vid), -1, dtype=np.int32)
-            for v in np.unique(vid):
-                vdata = labl_by_volume.get(f'v{v}')
-                mask = vid == v
-                if vdata is None:
-                    continue
-                d2g = vdata['deposit_to_group']
-                if len(d2g) != int(mask.sum()):
-                    log.warning("labl.v%d.deposit_to_group len %d != step "
-                                "volume %d len %d", v, len(d2g), v, mask.sum())
-                    continue
-                frag[mask] = _supera_labels.fragment_rows(
-                    vdata['group_fragment'], d2g)
-            self._attach_supera(sub, frag, labl_by_volume)
-        elif labl_by_volume and 'volume_id' in sub:
+        if labl_by_volume and 'volume_id' in sub:
             segment, instance = self._decorate_step_from_labl(
                 sub['volume_id'], labl_by_volume)
             sub['segment'] = segment
@@ -573,20 +558,7 @@ class JAXTPCDataset(ShardEventDataset):
             'instance': instance, 'planes': planes, 'raw': raw,
             'readout_type': self._readout_type,
         }
-        if 'particle' in labl_by_volume:
-            frags = []
-            for plane in planes:
-                vdata = labl_by_volume.get(f'v{plane.split("_")[1]}')
-                gid = raw[plane]['group_id']
-                frags.append(np.full(len(gid), -1, dtype=np.int32)
-                             if vdata is None else
-                             _supera_labels.fragment_rows(
-                                 vdata['group_fragment'], gid))
-            frag = (np.concatenate(frags) if frags
-                    else np.zeros(0, dtype=np.int32))
-            sub['instance_group'] = instance   # the JAXTPC group id
-            self._attach_supera(sub, frag, labl_by_volume)
-        elif labl_by_volume:
+        if labl_by_volume:
             sub['segment'] = self._decorate_hits_from_labl(
                 planes, raw, hits_raw, labl_by_volume)
             for out, kind, lk in self._track_axes():
@@ -598,15 +570,130 @@ class JAXTPCDataset(ShardEventDataset):
                     label_key=lk)[:, None]
         return sub
 
-    def _attach_supera(self, sub, frag, labl):
-        """Named keys + bare ``segment``/``instance`` from fragment rows."""
-        named = _supera_labels.point_labels(frag, labl,
-                                            momentum=self._momentum)
-        sub.update(named)
-        src = _SUPERA_SEGMENT[self._label_key]
-        sub['segment'] = (_supera_labels.pdg_of_points(frag, labl)
-                          if src is None else named[src][:, 0].copy())
-        sub['instance'] = named['instance_particle'][:, 0].copy()
+    # ------------------------------------------------------------------
+    # Relations: the group hub and the label tables (docs/LABELS.md)
+    # ------------------------------------------------------------------
+
+    def _build_relations(self, data, supera, hits_raw):
+        """Parts and references from a supera labl (hits only cross-check it).
+
+        Step and hits carry nothing above the group: one ``group`` reference
+        per deposit / hit entry. Everything from the group up — its Geant4
+        track, its owning fragment, the particle and interaction tables — comes
+        from labl.
+
+        ``group`` — one row per JAXTPC group, event-wide (each volume's local
+        ids are offset by the group counts of the volumes before it, as
+        pysupera does, since a particle can cross volumes): ``volume``,
+        ``track`` (Geant4 track id) and, with a supera labl, ``fragment``
+        (ref -> ``particle``). ``step.group`` / ``hits.group`` reference it
+        (``step.qs`` is the deposit's share of its group's charge, when hits
+        are loaded). ``particle`` and ``interaction`` are the labl tables with
+        their row references declared. Nothing is derived here."""
+        if supera is None:
+            # Everything above the group is labl's (docs/LABELS.md): with no
+            # labl there is no group part to reference. (Legacy track-labl
+            # data keeps its group_to_track in ``bridges``.)
+            return
+        per_vol = {}       # v -> dict(n, track, fragment, d2g, qs?)
+        if supera is not None:
+            for k, vd in supera.items():
+                if k.startswith('v'):
+                    per_vol[int(k[1:])] = dict(
+                        n=len(vd['group_fragment']),
+                        fragment=vd['group_fragment'],
+                        track=vd.get('group_track'),
+                        d2g=vd.get('deposit_to_group'))
+        if hits_raw is not None:
+            for k, g2t in hits_raw.items():
+                if not k.startswith('group_to_track_v'):
+                    continue
+                v = int(k.rsplit('_v', 1)[1])
+                d = per_vol.setdefault(v, dict(n=len(g2t)))
+                if d['n'] != len(g2t):
+                    raise ValueError(
+                        f"volume {v}: {d['n']} groups in labl, {len(g2t)} in "
+                        f"hits — labl and hits are not the same event/task")
+                if d.get('track') is None:     # labl predating group_track
+                    d['track'] = g2t
+                if d.get('d2g') is None:
+                    d['d2g'] = hits_raw.get(f'deposit_to_group_v{v}')
+                d['qs'] = hits_raw.get(f'qs_fractions_v{v}')
+        if self._volume is not None:
+            per_vol = {v: d for v, d in per_vol.items() if v == self._volume}
+        if not per_vol:
+            return
+        vols = sorted(per_vol)
+        base, b = {}, 0
+        for v in vols:
+            base[v] = b
+            b += per_vol[v]['n']
+        cat = lambda key, dt: np.concatenate(
+            [np.asarray(per_vol[v][key]).astype(dt) if per_vol[v].get(key)
+             is not None else np.full(per_vol[v]['n'], -1, dt) for v in vols])
+        group = {'volume': np.concatenate(
+                     [np.full(per_vol[v]['n'], v, np.int32) for v in vols]),
+                 'track': cat('track', np.int32), '_roles': {}}
+        if supera is not None:
+            group['fragment'] = cat('fragment', np.int32)
+            group['_roles']['fragment'] = ('ref', 'particle')
+        data['group'] = group
+
+        if 'step' in data and 'volume_id' in data['step']:
+            st = data['step']
+            vid = st['volume_id'].ravel()
+            ref = np.full(len(vid), -1, np.int32)
+            qs = np.full(len(vid), np.nan, np.float32)
+            for v in vols:
+                d2g = per_vol[v].get('d2g')
+                mask = vid == v
+                if d2g is None or not mask.any():
+                    continue
+                if len(d2g) != int(mask.sum()):
+                    raise ValueError(
+                        f"volume {v}: {len(d2g)} deposit_to_group entries, "
+                        f"{int(mask.sum())} step deposits")
+                ref[mask] = np.where(d2g >= 0, d2g + base[v], -1)
+                if per_vol[v].get('qs') is not None:
+                    qs[mask] = per_vol[v]['qs']
+            st['group'] = ref
+            if not np.isnan(qs).all():
+                st['qs'] = qs[:, None]
+            st.setdefault('_roles', {})['group'] = ('ref', 'group')
+
+        if 'hits' in data:
+            h = data['hits']
+            refs = []
+            for plane in h['planes']:
+                v = int(plane.split('_')[1])
+                gid = h['raw'][plane]['group_id']
+                refs.append(np.where(gid >= 0, gid + base[v], -1)
+                            if v in base else np.full(len(gid), -1))
+            h['group'] = (np.concatenate(refs).astype(np.int32) if refs
+                          else np.zeros(0, np.int32))
+            h.setdefault('_roles', {})['group'] = ('ref', 'group')
+
+        if supera is not None:
+            part = dict(supera['particle'])
+            part['_roles'] = {c: ('ref', 'particle') for c in (
+                'fragment', 'instance', 'fragment_instance', 'fragment_parent',
+                'instance_parent', 'parent', 'ancestor') if c in part}
+            part['_roles']['interaction'] = ('ref', 'interaction')
+            data['particle'] = part
+            data['interaction'] = dict(supera.get('interaction', {}),
+                                       _roles={})
+
+    def _resolve_labels(self, data, on):
+        """The PILArNet keys on ``on`` (``_resolve.PRESETS``), plus the bare
+        ``segment`` (picked by ``label_key``) and ``instance`` (particle)."""
+        _resolve.resolve(data, on, momentum=self._momentum)
+        sub = data[on]
+        src = _resolve.SEGMENT_OF_LABEL_KEY[self._label_key]
+        sub['segment'] = (
+            _resolve.follow(data, on, ('group', 'fragment',
+                                       'fragment_instance', 'pdg'))
+            .astype(np.int32) if src is None else sub[src][:, 0].copy())
+        sub['instance'] = sub['instance_particle'][:, 0].copy()
 
     def _coord_keys(self):
         """Per-plane column names that build the sensor/hits coord vector."""

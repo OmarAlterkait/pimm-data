@@ -98,6 +98,12 @@ def split_event(batch, i):
                 e[1] -= dlo
                 out[key] = e
             continue
+        if kind == 'ref':                                   # own rows, rebased target
+            lo, hi = span[_roles.part_of(key, parts)]
+            tlo = span[spec[1]][0]
+            v = batch[key][lo:hi]
+            out[key] = torch.where(v >= 0, v - tlo, v)
+            continue
         if kind == _roles.EVENT or _roles.part_of(key, parts) is None:
             out[key] = batch[key][i]                        # stacked (B,…) or list -> event i
             continue

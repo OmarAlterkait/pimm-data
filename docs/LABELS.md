@@ -26,6 +26,46 @@ Grouping is identical between the wire and pixel runs: step, `deposit_to_group` 
 `group_to_track` are byte-identical. Ownership differs by readout, because pysupera
 partitions wire on deposits and pixel on hits. So there is one `labl` per readout.
 
+## What lives where
+
+The rule: **a point file carries nothing above the group.** Step carries
+deposit → group, and hits carries hit entry → group. Everything from the group
+up lives in `labl`: group → track, group → fragment, the particle and interaction
+tables, and the references between them.
+
+On disk today `deposit_to_group` and `group_to_track` sit in the JAXTPC hits file.
+`labl` copies both (`deposit_to_group`, `group_track`), so step+labl and
+hits+labl are each complete.
+
+- `deposit_to_group` belongs in step by the rule. When JAXTPC writes it there,
+  `labl` drops its copy.
+- `group_to_track` belongs in `labl`; hits keeps it only for older data.
+
+Measured (10 events per readout, 1M task 0): every visible Geant4 track lies in
+exactly one fragment and one instance (0 exceptions in about 80k tracks). So
+group → track → instance is a chain of functions too. 26% (wire) and 39% (pixel)
+of visible tracks have no particle row, because they are merged shower members.
+
+## How pimm-data loads it
+
+`JAXTPCDataset` with a supera `labl` emits the event as parts linked by
+`('ref', part)` columns (`_roles.py`). Collate shifts each reference by its
+target part's running row count, and `split_event` undoes the shift.
+
+```
+step.group, hits.group            -> group          (only this, per point)
+group: volume, track, fragment    fragment -> particle
+particle: labl columns            fragment/instance/fragment_instance/parent/
+                                  ancestor/... -> particle, interaction -> interaction
+interaction: labl columns
+```
+
+Labels are walks along these references (`_resolve.follow`). The PILArNet keys
+are one preset (`_resolve.PRESETS['pilarnet']`). Class vocabularies are derived
+table columns (`particle.motif`, `pid`, `is_primary`, `momentum_*`,
+`interaction.vertex`), computed when loading, never stored. Point subsamples
+slice the references with their points and never touch the tables.
+
 ## Verified facts that set the key list
 
 | fact | consequence |
@@ -53,6 +93,7 @@ entry_NNNNNN/
                                      slot 0 and unowned groups = -1)
                                      <- groups/fragment_id, split by volume_offsets
     deposit_to_group  (N_v,) int32   copy from hits; the step -> group bridge
+    group_track       (G_v,) int32   copy of hits group_to_track (Geant4 track)
   particle/           (P rows)
   interaction/        (I rows)
 ```

@@ -47,6 +47,12 @@ def collate_with_roles(samples):
                 out[key] = _roles._shift_concat(col(key), offs(src), offs(dst))
         elif kind == 'label':
             out[key] = _roles.cat_label_col(col(key))
+        elif kind == 'ref':
+            if f'{spec[1]}_offset' not in samples[0]:
+                raise KeyError(
+                    f"collate: {key!r} references part {spec[1]!r}, which was "
+                    f"not collected; add it to Collect(parts=...).")
+            out[key] = _roles.cat_ref(col(key), offs(spec[1]))
         elif kind in (_roles.POINT, _roles.RAW, 'instance'):
             out[key] = _roles.cat_point(col(key))
         elif spec is None:

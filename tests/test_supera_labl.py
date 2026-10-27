@@ -208,10 +208,21 @@ def test_dataset_labels_match_supera(built):
             # primaries are the two instances that are their own parent
             prim = s['is_primary'][:, 0]
             assert np.all(prim[inst == 0] == 1) and np.all(prim[inst == 2] == 0)
-            # hits reach the same fragment through their group ids
+            # hits reach the same fragment through their group reference,
+            # and the group table's track is labl's copy of group_to_track
             h = x['hits']
             assert h['instance_fragment'].shape[0] == h['coord'].shape[0]
-            assert np.all(h['instance_group'] >= 0)
+            assert h['_roles']['group'] == ('ref', 'group')
+            g = x['group']
+            np.testing.assert_array_equal(
+                h['instance_fragment'][:, 0], np.where(
+                    h['group'] >= 0, g['fragment'][h['group']], -1))
+            g2t = np.concatenate([hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
+                                  for v in range(2)])
+            np.testing.assert_array_equal(g['track'], g2t)
+            # step and hits carry nothing above the group
+            for part in (s, h):
+                assert not {'track', 'fragment', 'deposit_to_track'} & set(part)
 
 
 def test_misaligned_event_id_raises(built, tmp_path):
@@ -271,3 +282,40 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
     got = set(zip(b['instance_particle'][:e0, 0].tolist(),
                   b['segment_pid'][:e0, 0].tolist()))
     assert got <= pairs
+
+
+def test_refs_shift_through_collate_and_split(built):
+    """('ref', part) columns batch like cross-store edges: shifted by the
+    target part's running row count, and split_event undoes it."""
+    from pimm_data import collate_fn, split_event
+    from pimm_data.transform import Compose
+    root, _, _, _, files = built
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+                       modalities=('step',))
+    pipe = Compose([dict(type='Collect', parts={
+        'step': dict(keys=('coord', 'group')),
+        'group': dict(keys=('fragment', 'track'),
+                      offset_keys_dict=dict(offset='fragment')),
+        'particle': dict(keys=('pdg', 'fragment_instance'),
+                         offset_keys_dict=dict(offset='pdg')),
+    })])
+    ev = [ds.get_data(i) for i in range(2)]
+    b = collate_fn([pipe(e) for e in ev])
+    assert b['_roles']['step_group'] == ('ref', 'group')
+    n_g0 = len(ev[0]['group']['fragment'])
+    n_p0 = len(ev[0]['particle']['pdg'])
+    s1 = int(b['step_offset'][0])
+    raw1 = ev[1]['step']['group']
+    got1 = b['step_group'][s1:].numpy()
+    np.testing.assert_array_equal(got1[raw1 >= 0], raw1[raw1 >= 0] + n_g0)
+    assert np.all(got1[raw1 < 0] == -1)
+    # a batched walk agrees with the per-event one
+    g = b['group_fragment'][b['step_group'].clamp(min=0)]
+    frag = np.where(b['step_group'].numpy() >= 0, g.numpy(), -1)
+    exp = np.concatenate([ev[0]['step']['instance_fragment'][:, 0],
+                          np.where(ev[1]['step']['instance_fragment'][:, 0] >= 0,
+                                   ev[1]['step']['instance_fragment'][:, 0] + n_p0,
+                                   -1)])
+    np.testing.assert_array_equal(frag, exp)
+    one = split_event(b, 1)
+    np.testing.assert_array_equal(one['step_group'].numpy(), raw1)

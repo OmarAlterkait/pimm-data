@@ -19,6 +19,7 @@ spec                meaning / collate behaviour
 ``('edge',(s,d))``  bipartite cross-store — row 0 shifts by ``s``'s node count, row 1 by ``d``'s
 ``('instance',ok)`` rows in a SECOND row-space — concat; counted by the role-declared offset key ``ok``
 ``('label',grp)``   categorical id — compact per event to ``0..K-1`` then add running distinct-count base, joint over ``grp``
+``('ref',part)``    per-row foreign key into part ``part``'s rows (``-1`` = none) — concat + shift ``>= 0`` values by ``part``'s running row count
 ==================  =========================================================
 
 This module is import-light (torch only) and has no pimm-data dependencies, so it can
@@ -35,6 +36,14 @@ key ``ok`` — read from the role spec, NOT hard-wired to a suffix (see
 keys and :func:`split_event` slices them by ``ok``'s span — never by the point ``offset``.
 The per-point ``instance`` *index* column is a different thing: it is ``point``-role (one
 row per point) and names which instance each point belongs to.
+
+**References between parts.** A ``('ref', part)`` column is one row per row of its
+own part (so point subsampling slices it with its rows) whose VALUE indexes another
+part's rows: a step deposit's JAXTPC ``group``, a group's owning ``particle``, a
+particle's ``interaction``. It is an edge whose source is implicit (the row itself),
+so it batches like a cross-store edge: collate adds the target part's running row
+count to every ``>= 0`` value and :func:`split_event` subtracts it again. The target
+must be collected as a part in the same batch. ``-1`` (no reference) is kept.
 
 **Per-event-local instance ids, global is a collate output.** A producer emits per-event
 instance indices compacted to ``0..K-1`` (so per-point ``instance`` indexes that event's
@@ -85,7 +94,7 @@ def node_bases(offset):
 # ── role parsing ─────────────────────────────────────────────────────────────
 def role_kind(spec):
     """Normalize a role spec to its kind string ('point'|'raw'|'event'|'edge'|
-    'instance'|'label')."""
+    'instance'|'label'|'ref')."""
     if spec in (POINT, RAW, EVENT):
         return spec
     if isinstance(spec, (tuple, list)) and spec:
@@ -173,6 +182,17 @@ def _shift_concat(edges, src_offsets, dst_offsets=None):
         src_base += src_counts[i]
         dst_base += dst_counts[i]
     return torch.cat(out, dim=-1)
+
+
+def cat_ref(values, target_offsets):
+    """('ref', part): concat per-event foreign keys, shifting each event's
+    ``>= 0`` values by the target part's running row count (-1 stays -1)."""
+    bases = node_bases(cat_offset(target_offsets))
+    out = []
+    for v, b in zip(values, bases):
+        v = torch.as_tensor(v)
+        out.append(torch.where(v >= 0, v + b.to(v.dtype), v))
+    return torch.cat(out, dim=0)
 
 
 def cat_label_col(values):
