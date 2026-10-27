@@ -471,3 +471,13 @@ def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
     mtime = got.stat().st_mtime
     write_campaign(str(camp), str(out), ('wire',), log=lambda m: None)
     assert got.stat().st_mtime == mtime          # skipped, not rewritten
+    # linked: the output tree is a campaign tree of its own
+    write_campaign(str(camp), str(out), ('wire',), link_inputs=True,
+                   log=lambda m: None)
+    task_dir = out / 'jaxtpc_wire' / 'j000000' / TASK
+    assert (task_dir / 'hits').is_symlink()
+    assert got.stat().st_mtime == mtime
+    ds = JAXTPCDataset(data_root=str(out / 'jaxtpc_wire'), runs='j*/*',
+                       labels='motif', modalities=('step', 'hits', 'labl'))
+    assert len(ds) == N_EVENTS
+    assert 'segment_motif' in ds.get_data(0)['hits']

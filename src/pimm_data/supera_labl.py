@@ -386,7 +386,10 @@ def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel')):
 
         {out_root}/jaxtpc_{ro}/{bucket}/jaxtpc_{ro}_{task}/labl/{name}_labl_{...}.h5
 
-    (``{name}_labl_`` replaces ``{name}_hits_`` in the hits file name.)"""
+    (``{name}_labl_`` replaces ``{name}_hits_`` in the hits file name.)
+    With ``link_inputs`` (:func:`write_campaign`), the task directory also
+    gets ``hits``/``step``/``sensor`` symlinks to the JAXTPC ones, so the
+    output tree is a complete campaign tree of its own."""
     jobs = []
     for ro in readouts:
         pat = os.path.join(data_root, f'supera_{ro}', '*', f'supera_{ro}_*',
@@ -402,12 +405,24 @@ def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel')):
             name = (os.path.basename(hits).replace('_hits_', '_labl_')
                     if hits else f'sim_{ro}_labl_{jt}.h5')
             jobs.append(dict(
-                supera=su, hits=hits,
+                supera=su, hits=hits, src=src,
                 step=mods['step'][0] if len(mods['step']) == 1 else None,
                 sensor=mods['sensor'][0] if len(mods['sensor']) == 1 else None,
                 out=os.path.join(out_root, f'jaxtpc_{ro}', bucket, jt, 'labl',
                                  name)))
     return jobs
+
+
+def _link_inputs(job):
+    """``{task}/{hits,step,sensor}`` -> the JAXTPC directories (idempotent)."""
+    if not os.path.isdir(job['src']):
+        return                  # no JAXTPC task: the job reports it
+    task = os.path.dirname(os.path.dirname(job['out']))
+    os.makedirs(task, exist_ok=True)
+    for m in ('hits', 'step', 'sensor'):
+        src, dst = os.path.join(job['src'], m), os.path.join(task, m)
+        if os.path.isdir(src) and not os.path.lexists(dst):
+            os.symlink(src, dst)
 
 
 def _run_job(job):
@@ -427,15 +442,21 @@ def _run_job(job):
 
 
 def write_campaign(data_root, out_root, readouts=('wire', 'pixel'),
-                   workers=1, shard=(0, 1), overwrite=False, log=print):
+                   workers=1, shard=(0, 1), overwrite=False, link_inputs=False,
+                   log=print):
     """Every pysupera file of a campaign -> its labl file (see
     :func:`campaign_tasks`), ``workers`` files at a time. Files already
     written are skipped unless ``overwrite`` (output appears only when
     complete, so a rerun resumes). ``shard=(i, n)`` takes every n-th job
-    from i, for a Slurm array. Returns the failures as ``{out: error}``."""
+    from i, for a Slurm array. ``link_inputs`` symlinks each task's JAXTPC
+    modalities beside its ``labl/`` (see :func:`campaign_tasks`). Returns the
+    failures as ``{out: error}``."""
     jobs = campaign_tasks(data_root, out_root, readouts)
     i, n = shard
     jobs = jobs[i::n]
+    if link_inputs:
+        for j in jobs:
+            _link_inputs(j)
     todo = [j for j in jobs if overwrite or not os.path.exists(j['out'])]
     log(f'{len(jobs)} files in shard {i}/{n}; {len(todo)} to write, '
         f'{workers} workers')
@@ -471,11 +492,14 @@ def main(argv=None):
         ap.add_argument('--workers', type=int, default=1)
         ap.add_argument('--shard', default='0/1', help='I/N (Slurm array)')
         ap.add_argument('--overwrite', action='store_true')
+        ap.add_argument('--link-inputs', action='store_true',
+                        help='symlink hits/step/sensor beside each labl/')
         a = ap.parse_args(argv[1:])
         i, n = (int(x) for x in a.shard.split('/'))
         failed = write_campaign(a.data_root, a.out_root, a.readouts,
                                 workers=a.workers, shard=(i, n),
                                 overwrite=a.overwrite,
+                                link_inputs=a.link_inputs,
                                 log=lambda m: print(m, flush=True))
         return 1 if failed else 0
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
