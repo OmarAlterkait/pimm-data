@@ -47,6 +47,7 @@ import numpy as np
 from .builder import DATASETS
 from ._dataset_base import ShardEventDataset
 from ._label_decorate import gather_with_fill
+from . import _supera_labels
 from .readers.jaxtpc_step import JAXTPCStepReader
 from .readers.jaxtpc_sensor import JAXTPCSensorReader
 from .readers.jaxtpc_labl import JAXTPCLablReader
@@ -88,6 +89,13 @@ def canonical_plane_id(label):
             f"canonical_plane_id: unknown plane type {t!r} in {label!r} "
             f"(expected one of {_PLANE_TYPES} or 'Pixel')")
     return v * len(_PLANE_TYPES) + _PLANE_TYPES.index(t)
+
+
+# label_key -> the named key the bare ``segment`` copies (supera-labl);
+# None = the instance's raw PDG.
+_SUPERA_SEGMENT = {'pdg': None, 'motif': 'segment_motif',
+                   'pid': 'segment_pid', 'particle': 'instance_particle',
+                   'interaction': 'instance_interaction'}
 
 
 @DATASETS.register_module()
@@ -135,6 +143,19 @@ class JAXTPCDataset(ShardEventDataset):
         ``'ancestor'``). Raw values from ``track_{label_key}`` are broadcast
         to each deposit / pixel entry; use a downstream ``RemapSegment`` to
         map raw values to task-specific class indices.
+
+        With a ``supera-labl`` file (pysupera labels, ``docs/LABELS.md``)
+        every named key is emitted regardless — ``segment_motif``,
+        ``segment_pid``, ``instance_particle``, ``instance_fragment``,
+        ``instance_interaction``, ``is_primary``, ``momentum``, ``vertex`` —
+        and ``label_key`` only picks the bare ``segment``: ``'pdg'`` (the
+        instance's raw PDG, for ``RemapSegment`` configs), ``'motif'``,
+        ``'pid'``, ``'particle'``, ``'interaction'``. ``instance`` is the
+        particle (instance) row.
+    momentum : str
+        ``supera-labl`` only: the per-point ``momentum`` is ``|p|`` of the
+        instance at creation (``'start'``, PILArNet's meaning) or at its first
+        visible step (``'first'``).
     min_deposits : int
         Minimum 3D deposits per event (step reader filter).
     include_physics : bool
@@ -159,6 +180,7 @@ class JAXTPCDataset(ShardEventDataset):
         labels=None,
         label_key='pdg',
         label_config=None,
+        momentum='start',
         min_deposits=0,
         include_physics=True,
         label_keys=None,
@@ -223,6 +245,7 @@ class JAXTPCDataset(ShardEventDataset):
         self._dataset_name = dataset_name
         self._volume = volume
         self._label_key = label_key
+        self._momentum = momentum
         self._label_config = label_config
         self._validate_label_config()
         self._min_deposits = min_deposits
@@ -283,6 +306,15 @@ class JAXTPCDataset(ShardEventDataset):
                 data_root=self._modality_root('labl'), split=split,
                 files=files.get('labl'),
                 dataset_name=dataset_name, label_keys=label_keys)
+            if self.labl_reader.kind == 'supera':
+                if self._label_config:
+                    raise ValueError(
+                        "label_config= is for track labl files; a supera-labl "
+                        "file emits every named key itself (docs/LABELS.md).")
+                if label_key not in _SUPERA_SEGMENT:
+                    raise ValueError(
+                        f"label_key={label_key!r} with a supera-labl file: "
+                        f"use one of {sorted(_SUPERA_SEGMENT)}.")
 
         if 'hits' in self._modalities:
             self.hits_reader = JAXTPCHitsReader(
@@ -348,7 +380,14 @@ class JAXTPCDataset(ShardEventDataset):
         }
 
         labl_by_volume = {}
-        if self.labl_reader is not None:
+        if self.labl_reader is not None and self.labl_reader.kind == 'supera':
+            labl_by_volume = self.labl_reader.read_event(real_idx)
+            if self._volume is not None:
+                labl_by_volume = {k: v for k, v in labl_by_volume.items()
+                                  if not k.startswith('v')
+                                  or k == f'v{self._volume}'}
+            data['labl'] = labl_by_volume
+        elif self.labl_reader is not None:
             labl_by_volume = self._build_labl(self.labl_reader.read_event(real_idx))
             if self._volume is not None:
                 # Drop labl volumes the user isn't loading (keeps the
@@ -389,7 +428,23 @@ class JAXTPCDataset(ShardEventDataset):
         for k, v in step_raw.items():
             sub[k] = v  # coord, energy, volume_id, physics — readers emit bare
 
-        if labl_by_volume and 'volume_id' in sub:
+        if 'particle' in labl_by_volume and 'volume_id' in sub:
+            vid = sub['volume_id'].ravel()
+            frag = np.full(len(vid), -1, dtype=np.int32)
+            for v in np.unique(vid):
+                vdata = labl_by_volume.get(f'v{v}')
+                mask = vid == v
+                if vdata is None:
+                    continue
+                d2g = vdata['deposit_to_group']
+                if len(d2g) != int(mask.sum()):
+                    log.warning("labl.v%d.deposit_to_group len %d != step "
+                                "volume %d len %d", v, len(d2g), v, mask.sum())
+                    continue
+                frag[mask] = _supera_labels.fragment_rows(
+                    vdata['group_fragment'], d2g)
+            self._attach_supera(sub, frag, labl_by_volume)
+        elif labl_by_volume and 'volume_id' in sub:
             segment, instance = self._decorate_step_from_labl(
                 sub['volume_id'], labl_by_volume)
             sub['segment'] = segment
@@ -518,7 +573,20 @@ class JAXTPCDataset(ShardEventDataset):
             'instance': instance, 'planes': planes, 'raw': raw,
             'readout_type': self._readout_type,
         }
-        if labl_by_volume:
+        if 'particle' in labl_by_volume:
+            frags = []
+            for plane in planes:
+                vdata = labl_by_volume.get(f'v{plane.split("_")[1]}')
+                gid = raw[plane]['group_id']
+                frags.append(np.full(len(gid), -1, dtype=np.int32)
+                             if vdata is None else
+                             _supera_labels.fragment_rows(
+                                 vdata['group_fragment'], gid))
+            frag = (np.concatenate(frags) if frags
+                    else np.zeros(0, dtype=np.int32))
+            sub['instance_group'] = instance   # the JAXTPC group id
+            self._attach_supera(sub, frag, labl_by_volume)
+        elif labl_by_volume:
             sub['segment'] = self._decorate_hits_from_labl(
                 planes, raw, hits_raw, labl_by_volume)
             for out, kind, lk in self._track_axes():
@@ -529,6 +597,16 @@ class JAXTPCDataset(ShardEventDataset):
                     planes, raw, hits_raw, labl_by_volume,
                     label_key=lk)[:, None]
         return sub
+
+    def _attach_supera(self, sub, frag, labl):
+        """Named keys + bare ``segment``/``instance`` from fragment rows."""
+        named = _supera_labels.point_labels(frag, labl,
+                                            momentum=self._momentum)
+        sub.update(named)
+        src = _SUPERA_SEGMENT[self._label_key]
+        sub['segment'] = (_supera_labels.pdg_of_points(frag, labl)
+                          if src is None else named[src][:, 0].copy())
+        sub['instance'] = named['instance_particle'][:, 0].copy()
 
     def _coord_keys(self):
         """Per-plane column names that build the sensor/hits coord vector."""

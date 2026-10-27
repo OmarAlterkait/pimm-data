@@ -28,7 +28,10 @@ TRANSFORMS = Registry("transforms")
 # columns. They must survive N-changing transforms (GridSample, dropout, …)
 # rather than being silently dropped or length-mismatched.
 _INDEX_SCHEMA_PREFIXES = ("segment", "instance", "target")
-_INDEX_PER_POINT_KEYS = ("particle_idx", "sensor_idx", "plane_id")
+# is_primary: per point wherever it is length-N (PILArNet v3, supera-labl
+# JAXTPC); it used to be carried only under revision == 'v3'.
+_INDEX_PER_POINT_KEYS = ("particle_idx", "sensor_idx", "plane_id",
+                         "is_primary")
 
 # Keys index_operator always carries through a point subsample. The schema
 # axes (segment_*/instance_*/target_*) and per-point FK columns are NOT listed

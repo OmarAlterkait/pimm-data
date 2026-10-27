@@ -15,11 +15,20 @@ Output: a dict of numpy arrays per volume, keyed ``labl_v{N}_{col}`` where
     labl_v0_track_ancestor:   (T,) int32  — ancestor track per track
     labl_v0_deposit_to_track: (N_v,) int32 — per-deposit FK into track_ids
 (Exact columns depend on the labl writer / the reader's ``label_keys``.)
+
+A ``supera-labl`` file (``/config.attrs['labl_format']``, written by
+:mod:`pimm_data.supera_labl`) is read whole instead, as nested tables::
+
+    {'particle': {col: (P,…)}, 'interaction': {col: (I,…)},
+     'v{N}': {'group_fragment': (G_v,), 'deposit_to_group': (N_v,)}}
+
+``reader.kind`` says which: ``'supera'`` or ``'track'``.
 """
 
 import numpy as np
 import h5py
 
+from .._shard_meta import read_shard_meta
 from ._base import ShardReaderBase
 
 
@@ -48,6 +57,9 @@ class JAXTPCLablReader(ShardReaderBase):
         self.dataset_name = dataset_name
         self.label_keys = label_keys
         self._init_shards()
+        fmt = str(read_shard_meta(self.h5_files[0])['config_attrs'].get(
+            'labl_format', ''))
+        self.kind = 'supera' if fmt.startswith('supera-labl') else 'track'
 
     def read_event(self, idx):
         """Read one event's per-volume label lookup tables.
@@ -60,6 +72,8 @@ class JAXTPCLablReader(ShardReaderBase):
         """
         f, event_key = self._locate_event(idx)
         evt = f[event_key]
+        if self.kind == 'supera':
+            return self._read_supera(evt)
 
         data_dict = {}
         for vol_key in evt:
@@ -82,3 +96,15 @@ class JAXTPCLablReader(ShardReaderBase):
                 data_dict[f'{prefix}_{lk}'] = vol[lk][:].astype(np.int32)
 
         return data_dict
+
+    @staticmethod
+    def _read_supera(evt):
+        """Whole event, nested; nothing is cast or filtered (the tables are
+        small, and their dtypes — float64 kinematics — are deliberate)."""
+        out = {}
+        for k, g in evt.items():
+            if not isinstance(g, h5py.Group):
+                continue
+            name = f'v{k[len("volume_"):]}' if k.startswith('volume_') else k
+            out[name] = {c: d[()] for c, d in g.items()}
+        return out

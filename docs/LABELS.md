@@ -1,6 +1,8 @@
 # The `labl` file: what to extract from pysupera
 
-Status: design, branch `doraemon-labels`, 2026-10-22. No code yet. Measured on
+Status: implemented on branch `doraemon-labels` (2026-10-27). Writer:
+`pimm_data/supera_labl.py`. Reader: `JAXTPCLablReader` (`kind == 'supera'`).
+Labels: `pimm_data/_supera_labels.py`. Measured on
 `doraemon_2026_1M_lartpc` (JAXTPC f0d2ed3, pysupera dab92d8 / format 4.1.0), task 0,
 wire and pixel.
 
@@ -118,6 +120,23 @@ Everything a model or metric uses is a gather; nothing new is stored:
 These are exactly the keys pimm's evaluators and heads already read for PILArNet.
 Deposits and hits in unowned groups are -1 everywhere. That is about 10% of wire and
 17% of pixel deposits in 1M, mostly charge outside the readout window.
+
+## Implemented, and checked on real data
+
+On 1M task 0 (20 events per readout), the per-hit labels `JAXTPCDataset` builds from
+`labl` + hits were compared with pysupera's own `hit_labels`:
+
+- **wire:** 0 mismatches over 6.46M hits;
+- **pixel:** 16 fragment / 2 instance / 4 LE mismatches over 11.9M on-sensor hits,
+  all in the majority-resolved straddling groups.
+
+Writing takes about 2 minutes per 1000-event task, and the output is about
+0.8 MB/event (wire). Most of that is the float64 kinematics (about 560 KB),
+kept because pysupera chose float64 to keep slow-nucleus KE. Storing them as
+float32 would halve the file.
+
+Hits carry the JAXTPC group id as `instance_group`, and `instance` becomes the
+particle row.
 
 ## Still needed from producers
 
