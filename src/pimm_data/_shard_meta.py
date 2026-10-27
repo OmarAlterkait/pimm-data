@@ -18,6 +18,47 @@ import os
 import numpy as np
 import h5py
 
+# Event group names. JAXTPC format 1 (and every other writer here) names them
+# ``event_NNN``; JAXTPC format 2 (``config.attrs['format_version'] == 2``,
+# doraemon 1M onward) names them ``entry_NNNNNN``. In both the number is the
+# group's position in the file; format 2 keeps the event's identity in entry
+# attributes and in ``/dprod/events`` instead.
+EVENT_PREFIXES = ('event_', 'entry_')
+KEY_FMTS = {'event_': 'event_{:03d}', 'entry_': 'entry_{:06d}'}
+
+
+def event_number(key):
+    """Event number of an event/entry group name, or None for anything else."""
+    for prefix in EVENT_PREFIXES:
+        if key.startswith(prefix) and key[len(prefix):].isdigit():
+            return int(key[len(prefix):])
+    return None
+
+
+def is_event_key(key):
+    return event_number(key) is not None
+
+
+def _dprod_event_ids(f, present, prefix):
+    """Campaign-unique ``event_id`` per present event, or None.
+
+    ``/dprod/events`` row k is entry k when the file has no gaps (its length
+    equals the entry count); otherwise each entry's own ``event_id`` attr is
+    read. Returned as an array indexable by event number (-1 where absent)."""
+    if 'dprod' not in f or 'events' not in f['dprod'] \
+            or 'event_id' not in f['dprod']['events'] or not len(present):
+        return None
+    ids = np.full(int(present[-1]) + 1, -1, dtype=np.int64)
+    table = f['dprod']['events']['event_id'][()].astype(np.int64)
+    if len(table) == len(present) and present[-1] == len(present) - 1:
+        ids[:] = table
+        return ids
+    for num in present:
+        a = f[KEY_FMTS[prefix].format(int(num))].attrs
+        if 'event_id' in a:
+            ids[int(num)] = int(a['event_id'])
+    return ids
+
 _CACHE = {}
 _DEPOSIT_CACHE = {}
 
@@ -45,9 +86,9 @@ def read_deposit_counts(path):
         n_volumes = (int(f['config'].attrs.get('n_volumes', 1))
                      if 'config' in f else 1)
         for k in f.keys():
-            if not k.startswith('event_'):
+            num = event_number(k)
+            if num is None:
                 continue
-            num = int(k.rsplit('_', 1)[1])
             evt = f[k]
             per_vol = [
                 (int(evt[f'volume_{v}'].attrs.get('n_actual', 0))
@@ -75,9 +116,12 @@ def read_shard_meta(path):
     with h5py.File(path, 'r', libver='latest', swmr=True) as f:
         cfg = f['config'] if 'config' in f else None
         config_attrs = dict(cfg.attrs) if cfg is not None else {}
-        present = np.array(sorted(
-            int(k.rsplit('_', 1)[1]) for k in f.keys()
-            if k.startswith('event_')), dtype=np.int64)
+        keys = [k for k in f.keys() if is_event_key(k)]
+        present = np.array(sorted(event_number(k) for k in keys),
+                           dtype=np.int64)
+        prefix = 'entry_' if any(k.startswith('entry_') for k in keys) \
+            else 'event_'
+        event_ids = _dprod_event_ids(f, present, prefix)
         # Per-file stable-identity vector (O(1)/file), if the writer stamped
         # it; indexable by event number. None when absent — the dataset then
         # resolves source_event_idx from global_event_offset + event_num
@@ -90,6 +134,10 @@ def read_shard_meta(path):
     meta = {
         'n_events': int(config_attrs.get('n_events', len(present))),
         'present_events': present,
+        'key_fmt': KEY_FMTS[prefix],
+        # Campaign-unique event id per event number (format 2 / dprod
+        # inputs), else None.
+        'event_ids': event_ids,
         'config_attrs': config_attrs,
         'source_event_idx': sei_vec,
         # Identity inputs (F1): file_index is the intrinsic shard id (both

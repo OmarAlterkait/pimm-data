@@ -24,8 +24,8 @@ from .._shard_meta import read_shard_meta, open_event_files
 
 log = logging.getLogger(__name__)
 
-# All shard writers name event groups ``event_NNN`` (≥3 digits; wider for
-# event numbers ≥ 1000 — ``:03d`` is a minimum width, not a cap).
+# Default event group name (``:03d`` is a minimum width, not a cap). A shard's
+# actual format comes from its metadata: JAXTPC format 2 uses ``entry_NNNNNN``.
 EVENT_KEY_FMT = "event_{:03d}"
 
 
@@ -56,17 +56,28 @@ class ShardReaderBase:
         """Glob shards: ``{root}/{split}/{name}_{modality}_*.h5`` then the
         flat ``{root}/{name}_{modality}_*.h5`` fallback.
 
+        ``self.files`` (a glob or list of globs/paths), when set, replaces the
+        search entirely — the doraemon layout keeps each modality in a folder
+        inside a per-task folder under per-1000-job buckets, which no single
+        root expresses. Within a run (or split) dir, a ``{modality}/``
+        subfolder is also searched: ``{root}/{run}/{modality}/{name}_*``.
+
         ``split`` may also be a list/tuple of run names (B2 ``runs=``): each
         run dir is globbed in the given order and every shard remembers its
         run (``self._file_runs``) so :meth:`run_of` can qualify event names.
         A run with no shards for this modality raises — a silently absent
         run would positionally desync the cross-modality joint index."""
+        explicit = getattr(self, 'files', None)
+        if explicit is not None:
+            pats = [explicit] if isinstance(explicit, str) else list(explicit)
+            return sorted({p for pat in pats for p in glob.glob(pat)})
+        fname = f"{self.dataset_name}_{self._MODALITY}_*.h5"
         if isinstance(self.split, (list, tuple)):
             files, file_runs = [], []
             for run in self.split:
                 run_files = sorted(glob.glob(os.path.join(
-                    self.data_root, run,
-                    f"{self.dataset_name}_{self._MODALITY}_*.h5")))
+                    self.data_root, run, fname))) or sorted(glob.glob(
+                    os.path.join(self.data_root, run, self._MODALITY, fname)))
                 if not run_files:
                     raise FileNotFoundError(
                         f"runs=: no {self._MODALITY} shards for run {run!r} "
@@ -77,10 +88,9 @@ class ShardReaderBase:
             self._file_runs = file_runs
             return files
         for pattern in (
-            os.path.join(self.data_root, self.split,
-                         f"{self.dataset_name}_{self._MODALITY}_*.h5"),
-            os.path.join(self.data_root,
-                         f"{self.dataset_name}_{self._MODALITY}_*.h5"),
+            os.path.join(self.data_root, self.split, fname),
+            os.path.join(self.data_root, self.split, self._MODALITY, fname),
+            os.path.join(self.data_root, fname),
         ):
             files = sorted(glob.glob(pattern))
             if files:
@@ -132,7 +142,34 @@ class ShardReaderBase:
         """Global ``idx`` → ``(file_handle, event_key)``."""
         self._ensure_open()
         file_idx, event_num = self.locate(idx)
-        return self._h5data[file_idx], EVENT_KEY_FMT.format(event_num)
+        return (self._h5data[file_idx],
+                self._key_fmt(file_idx).format(event_num))
+
+    def _shard_meta(self, file_idx):
+        """Cached metadata of shard ``file_idx``, memoized per path on the
+        reader so the per-event path never stats the file."""
+        cache = self.__dict__.setdefault('_meta_by_path', {})
+        path = self.h5_files[file_idx]
+        meta = cache.get(path)
+        if meta is None:
+            try:
+                meta = read_shard_meta(path)
+            except Exception:
+                meta = {}
+            cache[path] = meta
+        return meta
+
+    def _key_fmt(self, file_idx):
+        return self._shard_meta(file_idx).get('key_fmt', EVENT_KEY_FMT)
+
+    def event_id_of(self, idx):
+        """Campaign-unique ``event_id`` of global ``idx``, or None when the
+        shard does not carry one (format 1, non-dprod inputs)."""
+        file_idx, event_num = self.locate(idx)
+        ids = self._shard_meta(file_idx).get('event_ids')
+        if ids is None or event_num >= len(ids) or ids[event_num] < 0:
+            return None
+        return int(ids[event_num])
 
     def _ensure_open(self):
         """Open handles in THIS process; reopen after a fork.

@@ -41,8 +41,9 @@ class JAXTPCLablReader(ShardReaderBase):
     _MODALITY = 'labl'
 
     def __init__(self, data_root, split='train', dataset_name='sim',
-                 label_keys=None):
+                 label_keys=None, files=None):
         self.data_root = data_root
+        self.files = files
         self.split = split
         self.dataset_name = dataset_name
         self.label_keys = label_keys

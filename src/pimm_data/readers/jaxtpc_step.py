@@ -40,8 +40,10 @@ class JAXTPCStepReader(ShardReaderBase):
     _MODALITY = 'step'
 
     def __init__(self, data_root, split='train', dataset_name='sim',
-                 min_deposits=0, include_physics=True, volume=None):
+                 min_deposits=0, include_physics=True, volume=None,
+                 files=None):
         self.data_root = data_root
+        self.files = files
         self.split = split
         self.dataset_name = dataset_name
         self.min_deposits = min_deposits

@@ -18,6 +18,8 @@ All decoding is fully vectorized (no Python loops over groups).
 import numpy as np
 import h5py
 
+from .._shard_meta import is_event_key
+
 from ._jaxtpc_readout import JAXTPCReadoutReader
 
 
@@ -39,8 +41,9 @@ class JAXTPCHitsReader(JAXTPCReadoutReader):
     _MODALITY = 'hits'
 
     def __init__(self, data_root, split='train', dataset_name='sim',
-                 planes='all', **kwargs):
+                 planes='all', files=None, **kwargs):
         self.data_root = data_root
+        self.files = files
         self.split = split
         self.dataset_name = dataset_name
         self.planes = planes
@@ -52,7 +55,7 @@ class JAXTPCHitsReader(JAXTPCReadoutReader):
         first event's plane datasets. Returns 'wire'/'pixel'/None."""
         with h5py.File(path, 'r', libver='latest', swmr=True) as f:
             for ek in f:
-                if not ek.startswith('event_'):
+                if not is_event_key(ek):
                     continue
                 evt = f[ek]
                 for vk in evt:

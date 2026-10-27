@@ -17,6 +17,8 @@ import logging
 import numpy as np
 import h5py
 
+from .._shard_meta import is_event_key
+
 from ._jaxtpc_readout import JAXTPCReadoutReader
 
 # This module called log.warning() in an except handler without ever defining
@@ -61,8 +63,9 @@ class JAXTPCSensorReader(JAXTPCReadoutReader):
     def __init__(self, data_root, split='train', dataset_name='sim',
                  planes='all', decode_digitization=True,
                  n_wires_per_plane=None, num_time_steps=None,
-                 pedestal_per_plane=None):
+                 pedestal_per_plane=None, files=None):
         self.data_root = data_root
+        self.files = files
         self.split = split
         self.dataset_name = dataset_name
         self.planes = planes
@@ -83,7 +86,7 @@ class JAXTPCSensorReader(JAXTPCReadoutReader):
         Inspects only the first event group. Returns 'wire'/'pixel'/None."""
         with h5py.File(path, 'r', libver='latest', swmr=True) as f:
             for ek in f:
-                if not ek.startswith('event_'):
+                if not is_event_key(ek):
                     continue
                 evt = f[ek]
                 for vk in evt:
@@ -118,7 +121,7 @@ class JAXTPCSensorReader(JAXTPCReadoutReader):
                     if 'config' in f and 'num_time_steps' in f['config'].attrs:
                         return int(f['config'].attrs['num_time_steps'])
                     for ek in f:
-                        if ek.startswith('event_'):
+                        if is_event_key(ek):
                             if 'num_time_steps' in f[ek].attrs:
                                 return int(f[ek].attrs['num_time_steps'])
                             break

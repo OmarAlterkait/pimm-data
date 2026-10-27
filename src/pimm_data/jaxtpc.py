@@ -107,7 +107,14 @@ class JAXTPCDataset(ShardEventDataset):
         modality root with matches. Mutually exclusive with ``split=``.
         Event names become ``'<run>/<file>_evtNNN'`` — unique across runs —
         so content-addressed noise seeds, holdout hashing and cache identity
-        never collide (single-run ``split=`` names are unchanged).
+        never collide (single-run ``split=`` names are unchanged). Nested
+        patterns work: doraemon's ``'j*/*'`` selects every task dir.
+    files : dict[str, str | list[str]], optional
+        Per-modality shard globs (``{'step': '.../step/*.h5', ...}``),
+        replacing ``data_root``/``split``/``runs`` discovery for every loaded
+        modality. Shards pair across modalities by their trailing filename
+        token (the doraemon task tag ``j000000-000004``), so each modality may
+        live under its own root — e.g. ``labl`` produced separately.
     modalities : tuple[str]
         Any subset of ``'step'``, ``'sensor'``, ``'hits'``, ``'labl'``.
         ``('labl',)`` and ``('sensor', 'labl')`` are invalid (see
@@ -145,6 +152,7 @@ class JAXTPCDataset(ShardEventDataset):
         data_root,
         split='train',
         runs=None,
+        files=None,
         modalities=('step',),
         dataset_name='sim',
         volume=None,
@@ -236,6 +244,15 @@ class JAXTPCDataset(ShardEventDataset):
                     f"not both (got runs={runs!r}, split={split!r}).")
             split = self._expand_runs(runs, self._modalities)
         self._source_split = split
+        if files is not None:
+            missing = [m for m in self._modalities if m not in files] + (
+                ['labl'] if self._want_labels and 'labl' not in files
+                and 'labl' not in self._modalities else [])
+            if missing:
+                raise ValueError(
+                    f"files= must name every loaded modality; missing "
+                    f"{missing} (got {sorted(files)}).")
+        files = dict(files or {})
 
         self.step_reader = None
         self.sensor_reader = None
@@ -245,6 +262,7 @@ class JAXTPCDataset(ShardEventDataset):
         if 'step' in self._modalities:
             self.step_reader = JAXTPCStepReader(
                 data_root=self._modality_root('step'), split=split,
+                files=files.get('step'),
                 dataset_name=dataset_name, min_deposits=min_deposits,
                 include_physics=include_physics, volume=volume)
 
@@ -254,6 +272,7 @@ class JAXTPCDataset(ShardEventDataset):
         if 'sensor' in self._modalities:
             self.sensor_reader = JAXTPCSensorReader(
                 data_root=self._modality_root('sensor'), split=split,
+                files=files.get('sensor'),
                 dataset_name=dataset_name, planes='all',
                 n_wires_per_plane=n_wires_per_plane,
                 num_time_steps=num_time_steps,
@@ -262,11 +281,13 @@ class JAXTPCDataset(ShardEventDataset):
         if self._want_labels:
             self.labl_reader = JAXTPCLablReader(
                 data_root=self._modality_root('labl'), split=split,
+                files=files.get('labl'),
                 dataset_name=dataset_name, label_keys=label_keys)
 
         if 'hits' in self._modalities:
             self.hits_reader = JAXTPCHitsReader(
                 data_root=self._modality_root('hits'), split=split,
+                files=files.get('hits'),
                 dataset_name=dataset_name, planes='all')
 
         # Resolve readout_type once from whichever reader can tell us.

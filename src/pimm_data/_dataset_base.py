@@ -138,8 +138,11 @@ class ShardEventDataset(Dataset):
             tried = []
             for m in modalities:
                 root = self._modality_root(m)
+                # Relative to the root, not the basename, so a nested pattern
+                # ('j*/*': doraemon's per-1000-job buckets of task dirs)
+                # names runs uniquely. One level deep, the two agree.
                 expanded = sorted(
-                    os.path.basename(p.rstrip(os.sep))
+                    os.path.relpath(p.rstrip(os.sep), root)
                     for p in glob.glob(os.path.join(root, runs))
                     if os.path.isdir(p))
                 if expanded:
@@ -208,7 +211,9 @@ class ShardEventDataset(Dataset):
     def event_identity(self, idx):
         """Stable identity tuple for event ``idx``, for hash-based splitting.
 
-        Default: ``(config_id, file_index, physical_event_id)`` from the
+        ``(config_id, event_id)`` when the shard carries a campaign-unique
+        ``event_id`` (JAXTPC format 2), so the split survives re-sharding.
+        Otherwise ``(config_id, file_index, physical_event_id)`` from the
         canonical reader, matching :class:`~pimm_data.multimodal.MultiModalEventDataset`.
         The physical id comes from ``locate``, so it is the event's own id rather
         than its position in the joint index.
@@ -217,7 +222,14 @@ class ShardEventDataset(Dataset):
         does: its ``/ident`` triple names the SIMULATION event, so its split also
         survives a corpus rebuild with a different basis or noise model.
         """
-        file_idx, event_num = self._canonical_reader.locate(idx)
+        reader = self._canonical_reader
+        event_id = (reader.event_id_of(idx)
+                    if hasattr(reader, 'event_id_of') else None)
+        if event_id is not None:
+            # Campaign-unique id (JAXTPC format 2 / dprod): independent of
+            # which file, or where in it, the event landed.
+            return (getattr(self, '_config_id', 0), event_id)
+        file_idx, event_num = reader.locate(idx)
         return (getattr(self, '_config_id', 0), file_idx, event_num)
 
     def _holdout_ids(self, n, holdout, role):
