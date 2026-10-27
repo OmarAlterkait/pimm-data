@@ -138,6 +138,8 @@ entry_NNNNNN/
     group_track       (G_v,) int32   Geant4 track id of group g (hits
                                      group_to_track); matches particle.geant4_trackid
     deposit_to_group  (N_v,) int32   copy from hits; the step -> group bridge
+    deposit_in_window (N_v,) bool    the deposit's charge arrives inside the
+                                     readout window (needs --step --sensor)
   particle/   (P rows)  pysupera particles: fragments/instances, their links,
                         Geant4 ids, kinematics, interaction ref
   interaction/(I rows)  pysupera inter/: one row per interaction it kept
@@ -186,8 +188,19 @@ Everything a model or metric uses is a gather; nothing new is stored:
 
 These are exactly the keys pimm's evaluators and heads already read for PILArNet.
 Deposits and hits in unowned groups are -1 everywhere. That is about 10% of wire and
-17% of pixel deposits in 1M, mostly charge outside the readout window. JAXTPC will
-stop saving out-of-window deposits, so no in/out flag is needed here.
+17% of pixel deposits in 1M. `deposit_in_window` says why (1M task 0, 20 events,
+share of all deposits):
+
+| | wire | pixel |
+|---|---|---|
+| unowned, out of window | 8.4% | 16.4% |
+| unowned, in window (under threshold) | 2.4% | 1.8% |
+| owned, out of window (boundary straddlers) | 0.08% | 0.01% |
+
+The flag is the arrival tick `(t0 + |x - anode| / v + pre) / dt` in `[0, n)`, with
+the window from the sensor config. It is the one computed array in `labl`; it goes
+away once JAXTPC stops saving out-of-window deposits. pimm-data exposes it as
+`step.in_window`. On wire, a group is owned exactly when it has a hit.
 
 ## Implemented, and checked on real data
 
@@ -204,7 +217,8 @@ table), and `instance` becomes the particle row.
 ## Still needed from producers
 
 1. **A doraemon `labl` stage.** It does not exist in the 1M campaign.
-2. **JAXTPC:** drop out-of-window deposits; write `deposit_to_group` into step.
+2. **JAXTPC:** drop out-of-window deposits (then `deposit_in_window` goes); write
+   `deposit_to_group` into step.
 3. **pysupera (later):** the generator source per interaction.
 
 ## Open

@@ -10,7 +10,12 @@ interaction. The sensor is the summed readout and carries no labels. So a
   copies of the JAXTPC ``deposit_to_group`` and ``group_to_track`` (as
   ``group_track``), so step+labl needs no hits file: the Geant4 track of a
   group is also the one identity shared by the wire and pixel partitions;
-* the ``particle`` and ``interaction`` tables those rows index.
+* the ``particle`` and ``interaction`` tables those rows index;
+* given the step and sensor files, ``deposit_in_window`` per volume: whether
+  the deposit's charge arrives inside the readout window. An unowned group is
+  either out of the window or under threshold, and only this tells them apart.
+  It is the one computed array, and goes away once JAXTPC stops saving
+  out-of-window deposits.
 
 Everything is copied; the one transformation is that pysupera ids (``id``,
 ``frag_id``, ``parent_id``, …, which are *not* row positions) become row
@@ -27,7 +32,8 @@ with ``{dataset}_{step,hits,sensor}_{task}.h5`` by the trailing task token.
 Import-light on purpose (numpy, h5py, hdf5plugin only), so a production stage
 can run it without the rest of pimm_data::
 
-    python -m pimm_data.supera_labl SUPERA.h5 HITS.h5 OUT.h5
+    python -m pimm_data.supera_labl SUPERA.h5 HITS.h5 OUT.h5 \
+        [--step STEP.h5 --sensor SENSOR.h5]
 """
 
 import argparse
@@ -106,14 +112,51 @@ def _decode(a):
     return [x.decode() if isinstance(x, bytes) else str(x) for x in a]
 
 
+def _window(sensor_path):
+    """Readout window from the JAXTPC sensor config: per volume the anode x
+    (the x bound away from the shared central cathode), plus drift velocity
+    (mm/us), tick (us), ticks, and the pre-window (us)."""
+    with h5py.File(sensor_path, 'r') as f:
+        c = f['config']
+        ranges = np.asarray(c['volume_ranges'][:], np.float64)
+        a = c.attrs
+        centre = 0.5 * (ranges[:, 0, :].min() + ranges[:, 0, :].max())
+        anode = [r[0][np.argmax(np.abs(r[0] - centre))] for r in ranges]
+        return dict(anode=anode, v=float(a['velocity_cm_us']) * 10.0,
+                    dt=float(a['time_step_us']), n=int(a['num_time_steps']),
+                    pre=float(a.get('pre_window_us', 0.0)))
+
+
+def _in_window(sv, anode, w):
+    """Per deposit: its arrival tick ``(t0 + drift / v + pre) / dt`` lies in
+    ``[0, n)``. Checked on 1M task 0: hit times sit a constant offset from
+    this drift time (wire about -4 us, pixel about -0.25 us), and groups with
+    hits but no in-window deposit are a few per 10k (boundary straddlers)."""
+    q = sv['positions'][:]
+    if q.dtype.kind in 'ui':
+        x = sv.attrs['pos_origin_x'] + q[:, 0].astype(np.float64) \
+            * sv.attrs['pos_step_mm']
+    else:
+        x = q[:, 0].astype(np.float64)
+    t = sv['t0_us'][:].astype(np.float64) + np.abs(x - anode) / w['v']
+    tick = np.floor((t + w['pre']) / w['dt'])
+    return (tick >= 0) & (tick < w['n'])
+
+
 def write_labl(supera_path, hits_path, out_path, compression='lz4',
-               max_events=None):
+               max_events=None, step_path=None, sensor_path=None):
     """Extract ``supera_path`` into ``out_path``, aligned to ``hits_path``.
 
     ``hits_path`` is the JAXTPC hits file pysupera read (one file per task
     with merged inputs). It supplies ``deposit_to_group`` and is the
     alignment check: every entry's ``event_id`` and group count must agree.
-    ``max_events`` truncates (for testing); the result is then partial."""
+    ``step_path`` and ``sensor_path`` (the same task's JAXTPC step and sensor
+    files) add ``deposit_in_window``; give both or neither. ``max_events``
+    truncates (for testing); the result is then partial."""
+    if (step_path is None) != (sensor_path is None):
+        raise ValueError('give step_path and sensor_path together')
+    win = _window(sensor_path) if sensor_path is not None else None
+    st = h5py.File(step_path, 'r') if step_path is not None else None
     comp = ({'compression': 'gzip', 'compression_opts': 4}
             if compression == 'gzip' else
             hdf5plugin.Blosc(cname='lz4', clevel=5,
@@ -211,6 +254,15 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                         hv['deposit_to_group'][:].astype(np.int32), comp)
                 _create(ov, 'group_track',
                         hv['group_to_track'][:].astype(np.int32), comp)
+                if st is not None:
+                    sv = st[f'{key}/volume_{v}']
+                    if int(st[key].attrs['event_id']) != int(event_ids[e]):
+                        raise ValueError(f'{key}: event_id differs in step')
+                    if len(sv['t0_us']) != len(hv['deposit_to_group']):
+                        raise ValueError(f'{key}/volume_{v}: step and hits '
+                                         f'deposit counts differ')
+                    _create(ov, 'deposit_in_window',
+                            _in_window(sv, win['anode'][v], win), comp)
 
             op = oev.create_group('particle')
             for name, src in ID_COLUMNS:
@@ -226,6 +278,8 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 if col.dtype.kind in 'OS':
                     col = np.array(_decode(col), dtype=h5py.string_dtype())
                 _create(oi, c, col, comp)
+    if st is not None:
+        st.close()
     os.replace(out_path + '.tmp', out_path)
     return out_path
 
@@ -251,9 +305,13 @@ def main(argv=None):
     ap.add_argument('out')
     ap.add_argument('--compression', choices=('lz4', 'gzip'), default='lz4')
     ap.add_argument('--max-events', type=int, default=None)
+    ap.add_argument('--step', default=None,
+                    help='JAXTPC step file (with --sensor: deposit_in_window)')
+    ap.add_argument('--sensor', default=None, help='JAXTPC sensor file')
     a = ap.parse_args(argv)
     write_labl(a.supera, a.hits, a.out, compression=a.compression,
-               max_events=a.max_events)
+               max_events=a.max_events, step_path=a.step,
+               sensor_path=a.sensor)
 
 
 if __name__ == '__main__':

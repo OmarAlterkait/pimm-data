@@ -43,7 +43,8 @@ _DEFAULT_INDEX_VALID_KEYS = [
     "momentum",
     # JAXTPCDataset physics columns
     "track_ids", "group_ids", "pdg", "volume_id", "interaction_ids",
-    "ancestor_track_ids", "charge", "photons", "qs_fractions", "t0_us",
+    "ancestor_track_ids", "charge", "photons", "qs_fractions", "qs",
+    "in_window", "t0_us",
     "dx", "theta", "phi",
     "vertex",
 ]

@@ -349,3 +349,49 @@ def test_groups_without_labl_for_matching(built):
         assert x[part]['_roles']['group'] == ('ref', 'group')
         assert 'segment' not in x[part]
     assert not {'particle', 'interaction'} & set(x)
+
+
+def _make_sensor_config(step_path, out_path, n_ticks):
+    """Just the sensor config the window needs (velocity 1.6 mm/us, 0.5 us
+    ticks, no pre-window), volume_ranges copied from step."""
+    with h5py.File(step_path) as s, h5py.File(out_path, 'w') as f:
+        c = f.create_group('config')
+        c['volume_ranges'] = s['config/volume_ranges'][:]
+        c.attrs.update(velocity_cm_us=0.16, time_step_us=0.5,
+                       num_time_steps=n_ticks, pre_window_us=0.0)
+    return out_path
+
+
+def test_deposit_in_window(built, tmp_path):
+    """Arrival tick (t0 + drift to the outer anode / v) / dt in [0, n); the
+    dataset exposes it per step deposit, in volume order."""
+    root, supera, hits, _, files = built
+    step = os.path.join(root, 'j000000', TASK, 'step', f'sim_step_{TASK}.h5')
+    sensor = _make_sensor_config(step, str(tmp_path / 'sensor.h5'), 1350)
+    with pytest.raises(ValueError, match='together'):
+        write_labl(supera, hits, str(tmp_path / 'x.h5'), step_path=step)
+    ldir = tmp_path / 'labl'
+    ldir.mkdir()
+    labl = write_labl(supera, hits, str(ldir / f'sim_labl_{TASK}.h5'),
+                      step_path=step, sensor_path=sensor)
+    with h5py.File(step) as s, h5py.File(labl) as lb:
+        ranges = s['config/volume_ranges'][:]
+        key = sorted(k for k in lb if k.startswith('entry_'))[0]
+        got_all, frac = [], []
+        for v in range(len(ranges)):
+            sv = s[f'{key}/volume_{v}']
+            x = sv.attrs['pos_origin_x'] + sv['positions'][:, 0] \
+                * sv.attrs['pos_step_mm']
+            anode = ranges[v, 0, np.argmax(np.abs(ranges[v, 0]))]
+            tick = np.floor((sv['t0_us'][:].astype(np.float64)
+                             + np.abs(x - anode) / 1.6) / 0.5)
+            got = lb[f'{key}/volume_{v}/deposit_in_window'][:]
+            np.testing.assert_array_equal(got, (tick >= 0) & (tick < 1350))
+            got_all.append(got)
+        inw = np.concatenate(got_all)
+        assert 0 < inw.mean() < 1           # the window splits the sample
+    files = dict(files, labl=labl)
+    x = JAXTPCDataset(data_root=root, files=files, labels='motif',
+                      modalities=('step',)).get_data(0)
+    assert np.all(np.diff(x['step']['volume_id'].ravel()) >= 0)
+    np.testing.assert_array_equal(x['step']['in_window'][:, 0], inw)

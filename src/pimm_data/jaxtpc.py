@@ -603,7 +603,8 @@ class JAXTPCDataset(ShardEventDataset):
                         n=len(vd['group_fragment']),
                         fragment=vd['group_fragment'],
                         track=vd.get('group_track'),
-                        d2g=vd.get('deposit_to_group'))
+                        d2g=vd.get('deposit_to_group'),
+                        inw=vd.get('deposit_in_window'))
         if hits_raw is not None:
             for k, g2t in hits_raw.items():
                 if not k.startswith('group_to_track_v'):
@@ -645,6 +646,8 @@ class JAXTPCDataset(ShardEventDataset):
             st = data['step']
             vid = st['volume_id'].ravel()
             ref = np.full(len(vid), -1, np.int32)
+            inw = np.zeros(len(vid), np.int32)
+            has_inw = any(per_vol[v].get('inw') is not None for v in vols)
             for v in vols:
                 d2g = per_vol[v].get('d2g')
                 mask = vid == v
@@ -655,7 +658,13 @@ class JAXTPCDataset(ShardEventDataset):
                         f"volume {v}: {len(d2g)} deposit_to_group entries, "
                         f"{int(mask.sum())} step deposits")
                 ref[mask] = np.where(d2g >= 0, d2g + base[v], -1)
+                if per_vol[v].get('inw') is not None:
+                    inw[mask] = per_vol[v]['inw']
             st['group'] = ref
+            if has_inw:
+                # labl's: does the deposit's charge reach the readout window
+                # (an unowned group is out of it, or under threshold)
+                st['in_window'] = inw[:, None]
             if 'charge' in st:
                 # A deposit's share of its group's recombined charge — JAXTPC's
                 # qs_fractions, which is exactly this (to float16): a step
