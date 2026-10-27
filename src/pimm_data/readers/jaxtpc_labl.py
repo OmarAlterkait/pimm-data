@@ -21,7 +21,8 @@ A ``supera-labl`` file (``/config.attrs['labl_format']``, written by
 
     {'particle': {col: (P,…)}, 'interaction': {col: (I,…)},
      'track': {'id': (T,), 'fragment': (T,)},
-     'v{N}': {'group_track': (G_v,), 'deposit_to_group': (N_v,)}}
+     'v{N}': {'group_track': (G_v,), 'deposit_to_group': (N_v,),
+              ['override_group', 'override_fragment']: (K_v,)}}
 
 ``reader.kind`` says which: ``'supera'`` or ``'track'``.
 """

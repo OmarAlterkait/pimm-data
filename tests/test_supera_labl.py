@@ -92,6 +92,9 @@ def _make_supera(hits_path, out_path, seed=0):
                 n_g = len(g2t)
                 own = np.array([owner[int(t)] for t in g2t])
                 own[rng.random(n_g) < 0.1] = -1
+                # pysupera splits the odd track between two fragments
+                split = np.flatnonzero(own >= 0)[:2]
+                own[split] = (own[split] + 1) % 6
                 own[0] = -1
                 frag_ids.extend(np.where(own >= 0, ids[np.maximum(own, 0)], -1))
                 v_off.append(base)
@@ -159,14 +162,19 @@ def test_rows_point_where_the_ids_pointed(built):
                 np.testing.assert_array_equal(
                     back(ev['particle'][name][:]),
                     su[f'particles/{src}'][off[e]:off[e + 1]])
-            # every owned group's fragment is its track's
+            # every owned group's fragment is its track's, or an override
             g2t = np.concatenate([ev[f'volume_{v}/group_track'][:]
                                   for v in range(2)])
             gf = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
             tid, tf = ev['track/id'][:], back(ev['track/fragment'][:])
             assert np.all(np.diff(tid) > 0)
-            np.testing.assert_array_equal(
-                tf[np.searchsorted(tid, g2t[gf >= 0])], gf[gf >= 0])
+            got = tf[np.minimum(np.searchsorted(tid, g2t), len(tid) - 1)]
+            n0 = len(ev['volume_0/group_track'])
+            for v in range(2):
+                if 'override_group' in ev[f'volume_{v}']:
+                    g = ev[f'volume_{v}/override_group'][:] + v * n0
+                    got[g] = back(ev[f'volume_{v}/override_fragment'][:])
+            np.testing.assert_array_equal(got[gf >= 0], gf[gf >= 0])
             assert set(tid) == set(g2t[gf >= 0])
 
 
@@ -190,19 +198,25 @@ def test_dataset_labels_match_supera(built):
             pdg = su['particles/pdg'][off[e]:off[e + 1]]
             gfrag = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
             voff = vo[vi[e]:vi[e + 1]]
-            # a group's fragment is its track's owner (from any owned group)
-            t_own = {}
+            # an owned group keeps pysupera's owner; an unowned one gets
+            # its track's (the owner of most of the track's groups)
+            from collections import Counter
+            votes = {}
             for v in range(2):
                 g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
                 gf_v = gfrag[voff[v]:voff[v] + len(g2t_v)]
-                t_own.update(zip(g2t_v[gf_v >= 0].tolist(),
-                                 gf_v[gf_v >= 0].tolist()))
+                for t, f in zip(g2t_v[gf_v >= 0], gf_v[gf_v >= 0]):
+                    votes.setdefault(int(t), Counter())[int(f)] += 1
+            t_own = {t: max(sorted(c), key=lambda f: c[f])
+                     for t, c in votes.items()}
             # expected per deposit, volume by volume (step concatenates them)
             exp_f, exp_m, exp_i, exp_p = [], [], [], []
             for v in range(2):
                 d2g = hi[f'entry_{e:06d}/volume_{v}/deposit_to_group'][:]
                 g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
-                fid = np.array([t_own.get(int(t), -1) for t in g2t_v[d2g]])
+                gf_v = gfrag[voff[v]:voff[v] + len(g2t_v)]
+                fid = np.array([gf_v[g] if gf_v[g] >= 0 else
+                                t_own.get(int(g2t_v[g]), -1) for g in d2g])
                 fr = np.array([row_of.get(int(i), -1) for i in fid])
                 inst = np.array([row_of[int(finst[r])] if r >= 0 else -1
                                  for r in fr])
@@ -420,3 +434,40 @@ def test_deposit_in_window(built, tmp_path):
                       modalities=('step',)).get_data(0)
     assert np.all(np.diff(x['step']['volume_id'].ravel()) >= 0)
     np.testing.assert_array_equal(x['step']['in_window'][:, 0], inw)
+
+
+def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
+    """campaign: every pysupera file of a doraemon tree -> labl/ beside where
+    JAXTPC's modalities live; reruns skip finished files; a task missing a
+    JAXTPC modality is reported, not fatal."""
+    from pimm_data.supera_labl import write_campaign
+    root, supera, hits, labl, _ = built
+    camp = tmp_path / 'camp'
+    src = os.path.join(root, 'j000000', TASK)
+    dst = camp / 'jaxtpc_wire' / 'j000000' / TASK
+    for m in ('step', 'hits'):
+        (dst / m).mkdir(parents=True)
+        f = os.listdir(os.path.join(src, m))[0]
+        os.symlink(os.path.join(src, m, f), dst / m / f)
+    (dst / 'sensor').mkdir()
+    _make_sensor_config(str(dst / 'step' / f'sim_step_{TASK}.h5'),
+                        str(dst / 'sensor' / f'sim_sensor_{TASK}.h5'), 1350)
+    task = TASK[len('jaxtpc_wire_'):]
+    for t in (task, 'j000005-000009'):          # the second has no JAXTPC
+        d = camp / 'supera_wire' / 'j000000' / f'supera_wire_{t}'
+        d.mkdir(parents=True)
+        os.symlink(supera, d / f'supera_wire_{t}.h5')
+    out = tmp_path / 'out'
+    failed = write_campaign(str(camp), str(out), ('wire',), workers=2,
+                            log=lambda m: None)
+    got = out / 'jaxtpc_wire' / 'j000000' / TASK / 'labl' / f'sim_labl_{TASK}.h5'
+    assert got.exists() and len(failed) == 1
+    assert 'FileNotFoundError' in next(iter(failed.values()))
+    with h5py.File(got) as a, h5py.File(labl) as b:
+        k = 'entry_000000'
+        np.testing.assert_array_equal(a[f'{k}/track/fragment'][:],
+                                      b[f'{k}/track/fragment'][:])
+        assert 'deposit_in_window' in a[f'{k}/volume_0']
+    mtime = got.stat().st_mtime
+    write_campaign(str(camp), str(out), ('wire',), log=lambda m: None)
+    assert got.stat().st_mtime == mtime          # skipped, not rewritten

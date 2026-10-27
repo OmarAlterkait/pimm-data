@@ -158,7 +158,7 @@ Measured on 1M task 0 (20 events per readout):
 | map | exact? |
 |---|---|
 | group → track | yes, by construction (JAXTPC) |
-| track → fragment | yes: 0 tracks with two owners in 186k (wire) / 201k (pixel) visible tracks |
+| track → fragment | all but ~1 track in 10⁶: over 200 events, 2 (wire) / 3 (pixel) tracks of ~2M are split by pysupera between two fragments (7 / 20 groups). `track.fragment` is the owner of most of the track's groups; the others are listed per volume as `override_group` / `override_fragment`, so labels stay exact |
 | fragment → instance → interaction | yes, in the particle table (read the instance's `interaction`: 19 pixel LE fragment rows disagree with their instance) |
 | track → particle row (`geant4_trackid`) | no: 26% / 39% of visible tracks have no row (merged into another fragment, mostly LE and shower e/γ); 6% have a row that is not their owner (delta rays merged into the parent); 9 pixel tracks have two rows |
 
@@ -168,6 +168,19 @@ readouts). Step labels differ only in groups pysupera left unowned while their t
 is owned elsewhere: 3.8% (wire) / 5.1% (pixel) of deposits, 99% of them out of the
 window (`deposit_in_window` masks those, and JAXTPC will drop them). The remaining
 0.05% are in-window groups under threshold, now labelled with their track's fragment.
+
+### Producing it
+
+    python -m pimm_data.supera_labl campaign DATA_ROOT OUT_ROOT --workers N [--shard I/N]
+
+runs over every pysupera file of a campaign and writes
+`OUT_ROOT/jaxtpc_{ro}/{bucket}/jaxtpc_{ro}_{task}/labl/*_labl_*.h5`, the JAXTPC
+tree with only `labl/` in it. Finished files are skipped (output appears only when
+complete), failures are reported without stopping. Measured on milano, 16 workers,
+17 real 1000-event files: about 65 s per file per core, no slowdown from running 16
+at once, under 1 GB per worker, 0.82 GB per file. The whole 1M campaign (1960
+files) is about 35 core-hours and 1.6 TB. Once pysupera runs this itself, the stage
+goes away.
 
 Size, 1M task 0: about 0.9 MB/event; writing takes about 2 minutes per 1000-event
 task.

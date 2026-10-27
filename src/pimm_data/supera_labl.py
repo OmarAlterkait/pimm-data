@@ -3,14 +3,17 @@
 The label of a deposit or a hit is the label of its JAXTPC *group*, and a
 group belongs to one Geant4 track. pysupera records, per group, the fragment
 that owns it (``groups/fragment_id``); that owner is a function of the group's
-track (no exception in 1M), so ``labl`` stores the hierarchy once, as maps:
+track for all but about one track in a million, so ``labl`` stores the
+hierarchy once, as maps, with those few groups listed as overrides:
 
     group -> track -> fragment -> instance -> interaction
 
 * per volume, copies of the JAXTPC ``deposit_to_group`` and
   ``group_to_track`` (as ``group_track``), so step+labl needs no hits file;
 * ``track``: each visible Geant4 track (``id``, sorted) and the ``fragment``
-  row that owns it. A particle row is not enough: a quarter to a third of
+  row that owns it (the owner of most of its groups); per volume,
+  ``override_group`` / ``override_fragment`` for the owned groups whose owner
+  differs (a track pysupera split between fragments). A particle row is not enough: a quarter to a third of
   visible tracks have none (merged into another fragment), and a merged delta
   ray's own row is not its owner;
 * the ``particle`` table (fragment -> instance -> interaction, and the rest of
@@ -38,11 +41,18 @@ can run it without the rest of pimm_data::
 
     python -m pimm_data.supera_labl SUPERA.h5 HITS.h5 OUT.h5 \
         [--step STEP.h5 --sensor SENSOR.h5]
+
+or, over a whole doraemon campaign (every pysupera file, in parallel)::
+
+    python -m pimm_data.supera_labl campaign DATA_ROOT OUT_ROOT \
+        [--readouts wire pixel] [--workers N] [--shard I/N]
 """
 
 import argparse
+import glob
 import os
 import sys
+import time
 
 import h5py
 import hdf5plugin
@@ -147,8 +157,49 @@ def _in_window(sv, anode, w):
     return (tick >= 0) & (tick < w['n'])
 
 
+def _track_owner(own_t, own_f):
+    """Per volume, the owned groups' Geant4 tracks and owners -> sorted track
+    ids, each track's owner (the one owning most of its groups), and per
+    volume a mask of the groups whose owner differs (None if none do)."""
+    t = np.concatenate(own_t).astype(np.int64)
+    f = np.concatenate(own_f).astype(np.int64)
+    # (track, fragment) pairs as one int64 key: a 1-D sort, not a row sort
+    keys, counts = np.unique((t << 32) | f, return_counts=True)
+    pt, pf = keys >> 32, keys & 0xFFFFFFFF
+    if len(np.unique(pt)) == len(pt):
+        return pt, pf.astype(np.int32), None
+    # most groups first within each track, then the first pair per track
+    order = np.lexsort((-counts, pt))
+    tid, first = np.unique(pt[order], return_index=True)
+    tfrag = pf[order][first].astype(np.int32)
+    over = [fv != tfrag[np.searchsorted(tid, tv)]
+            for tv, fv in zip(own_t, own_f)]
+    return tid, tfrag, over
+
+
+class _Block:
+    """A pysupera CSR table read ``size`` events at a time: one h5py read
+    per column per block, not per event (per-call overhead dominated)."""
+
+    def __init__(self, grp, cols, off, size):
+        self.grp, self.cols, self.off, self.size = grp, cols, off, size
+        self.lo = self.hi = -1
+
+    def __call__(self, e):
+        if not self.lo <= e < self.hi:
+            self.lo = e
+            self.hi = min(e + self.size, len(self.off) - 1)
+            a, b = int(self.off[self.lo]), int(self.off[self.hi])
+            self.base = a
+            self.data = {c: self.grp[c][a:b] for c in self.cols}
+        a = int(self.off[e]) - self.base
+        b = int(self.off[e + 1]) - self.base
+        return {c: v[a:b] for c, v in self.data.items()}
+
+
 def write_labl(supera_path, hits_path, out_path, compression='lz4',
-               max_events=None, step_path=None, sensor_path=None):
+               max_events=None, step_path=None, sensor_path=None,
+               block=100):
     """Extract ``supera_path`` into ``out_path``, aligned to ``hits_path``.
 
     ``hits_path`` is the JAXTPC hits file pysupera read (one file per task
@@ -156,7 +207,8 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
     alignment check: every entry's ``event_id`` and group count must agree.
     ``step_path`` and ``sensor_path`` (the same task's JAXTPC step and sensor
     files) add ``deposit_in_window``; give both or neither. ``max_events``
-    truncates (for testing); the result is then partial."""
+    truncates (for testing); the result is then partial. pysupera is read
+    ``block`` events at a time."""
     if (step_path is None) != (sensor_path is None):
         raise ValueError('give step_path and sensor_path together')
     win = _window(sensor_path) if sensor_path is not None else None
@@ -184,10 +236,14 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
         v_off = su['groups/volume_offsets'][:]
         v_idx = su['groups/volume_offsets_index'][:]
         i_off = su['inter/offsets'][:]
-        P, G, I = su['particles'], su['groups'], su['inter']
+        I = su['inter']
         icols = list(INTERACTION_COLUMNS) + [
             c for c in OPTIONAL_INTERACTION_COLUMNS
             if c in I and any(_decode(I[c][:min(len(I[c]), 4096)]))]
+        P = _Block(su['particles'], ['id'] + sorted(
+            {src for _, src in ID_COLUMNS + VALUE_COLUMNS}), p_off, block)
+        G = _Block(su['groups'], ['fragment_id'], g_off, block)
+        I = _Block(I, icols, i_off, block)
 
         cfg = out.create_group('config')
         cfg.attrs['labl_format'] = LABL_FORMAT
@@ -231,20 +287,20 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
             for c, v in id_cols.items():
                 oev.attrs[c] = int(v[e])
 
-            ps = slice(int(p_off[e]), int(p_off[e + 1]))
-            ids = P['id'][ps].astype(np.int64)
+            pe = P(e)
+            ids = pe['id'].astype(np.int64)
             sorter = np.argsort(ids, kind='stable').astype(np.int32)
             row_of_id = (sorter, ids[sorter])
 
             n_vol = sum(1 for k in hev if k.startswith('volume_'))
-            gfrag = _to_rows(G['fragment_id'][int(g_off[e]):int(g_off[e + 1])],
-                             row_of_id, f'{key} groups/fragment_id')
+            gfrag = _to_rows(G(e)['fragment_id'], row_of_id,
+                             f'{key} groups/fragment_id')
             voffs = v_off[int(v_idx[e]):int(v_idx[e + 1])]
             if len(voffs) != n_vol:
                 raise ValueError(f'{key}: {len(voffs)} pysupera volumes, '
                                  f'{n_vol} in hits')
             bounds = list(voffs) + [len(gfrag)]
-            own_t, own_f = [], []
+            own_t, own_f, own_g, vol_groups = [], [], [], []
             for v in range(n_vol):
                 hv = hev[f'volume_{v}']
                 gv = gfrag[int(bounds[v]):int(bounds[v + 1])]
@@ -256,7 +312,9 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 g2t = hv['group_to_track'][:]
                 own_t.append(g2t[gv >= 0])
                 own_f.append(gv[gv >= 0])
+                own_g.append(np.flatnonzero(gv >= 0))
                 ov = oev.create_group(f'volume_{v}')
+                vol_groups.append(ov)
                 _create(ov, 'deposit_to_group',
                         hv['deposit_to_group'][:].astype(np.int32), comp)
                 _create(ov, 'group_track',
@@ -272,27 +330,28 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                             _in_window(sv, win['anode'][v], win), comp)
 
             # track -> owning fragment, from the owned groups of every volume
-            own_t = np.concatenate(own_t).astype(np.int64)
-            own_f = np.concatenate(own_f)
-            tid, first = np.unique(own_t, return_index=True)
-            tfrag = own_f[first]
-            if not np.array_equal(own_f, tfrag[np.searchsorted(tid, own_t)]):
-                raise ValueError(f'{key}: a track owned by two fragments')
+            tid, tfrag, over = _track_owner(own_t, own_f)
+            for v, ov in enumerate(vol_groups):
+                m = over[v] if over is not None else np.zeros(0, bool)
+                if m.any():
+                    _create(ov, 'override_group',
+                            own_g[v][m].astype(np.int32), comp)
+                    _create(ov, 'override_fragment', own_f[v][m], comp)
             ot = oev.create_group('track')
             _create(ot, 'id', tid.astype(np.int32), comp)
             _create(ot, 'fragment', tfrag.astype(np.int32), comp)
 
             op = oev.create_group('particle')
             for name, src in ID_COLUMNS:
-                _create(op, name, _to_rows(P[src][ps], row_of_id,
+                _create(op, name, _to_rows(pe[src], row_of_id,
                                            f'{key} {src}'), comp)
             for name, src in VALUE_COLUMNS:
-                _create(op, name, P[src][ps], comp)
+                _create(op, name, pe[src], comp)
 
             oi = oev.create_group('interaction')
-            isl = slice(int(i_off[e]), int(i_off[e + 1]))
+            ie = I(e)
             for c in icols:
-                col = I[c][isl]
+                col = ie[c]
                 if col.dtype.kind in 'OS':
                     col = np.array(_decode(col), dtype=h5py.string_dtype())
                 _create(oi, c, col, comp)
@@ -316,7 +375,109 @@ def _copy_provenance(su, cfg):
     su['provenance'].visititems(visit)
 
 
+def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel')):
+    """One job per pysupera file of a doraemon campaign::
+
+        {data_root}/supera_{ro}/{bucket}/supera_{ro}_{task}/supera_*.h5
+        {data_root}/jaxtpc_{ro}/{bucket}/jaxtpc_{ro}_{task}/{hits,step,sensor}/
+
+    The labl file goes where JAXTPC would put a fourth modality, so the output
+    tree is the JAXTPC tree with only ``labl/`` in it::
+
+        {out_root}/jaxtpc_{ro}/{bucket}/jaxtpc_{ro}_{task}/labl/{name}_labl_{...}.h5
+
+    (``{name}_labl_`` replaces ``{name}_hits_`` in the hits file name.)"""
+    jobs = []
+    for ro in readouts:
+        pat = os.path.join(data_root, f'supera_{ro}', '*', f'supera_{ro}_*',
+                           f'supera_{ro}_*.h5')
+        for su in sorted(glob.glob(pat)):
+            bucket = os.path.basename(os.path.dirname(os.path.dirname(su)))
+            task = os.path.basename(os.path.dirname(su))[len(f'supera_{ro}_'):]
+            jt = f'jaxtpc_{ro}_{task}'
+            src = os.path.join(data_root, f'jaxtpc_{ro}', bucket, jt)
+            mods = {m: glob.glob(os.path.join(src, m, '*.h5'))
+                    for m in ('hits', 'step', 'sensor')}
+            hits = mods['hits'][0] if len(mods['hits']) == 1 else None
+            name = (os.path.basename(hits).replace('_hits_', '_labl_')
+                    if hits else f'sim_{ro}_labl_{jt}.h5')
+            jobs.append(dict(
+                supera=su, hits=hits,
+                step=mods['step'][0] if len(mods['step']) == 1 else None,
+                sensor=mods['sensor'][0] if len(mods['sensor']) == 1 else None,
+                out=os.path.join(out_root, f'jaxtpc_{ro}', bucket, jt, 'labl',
+                                 name)))
+    return jobs
+
+
+def _run_job(job):
+    t = time.time()
+    try:
+        missing = [m for m in ('hits', 'step', 'sensor') if job[m] is None]
+        if missing:
+            raise FileNotFoundError(f'no single JAXTPC {missing} file')
+        os.makedirs(os.path.dirname(job['out']), exist_ok=True)
+        write_labl(job['supera'], job['hits'], job['out'],
+                   step_path=job['step'], sensor_path=job['sensor'])
+        return job['out'], time.time() - t, None
+    except Exception as exc:                      # report, keep going
+        if os.path.exists(job['out'] + '.tmp'):
+            os.remove(job['out'] + '.tmp')
+        return job['out'], time.time() - t, f'{type(exc).__name__}: {exc}'
+
+
+def write_campaign(data_root, out_root, readouts=('wire', 'pixel'),
+                   workers=1, shard=(0, 1), overwrite=False, log=print):
+    """Every pysupera file of a campaign -> its labl file (see
+    :func:`campaign_tasks`), ``workers`` files at a time. Files already
+    written are skipped unless ``overwrite`` (output appears only when
+    complete, so a rerun resumes). ``shard=(i, n)`` takes every n-th job
+    from i, for a Slurm array. Returns the failures as ``{out: error}``."""
+    jobs = campaign_tasks(data_root, out_root, readouts)
+    i, n = shard
+    jobs = jobs[i::n]
+    todo = [j for j in jobs if overwrite or not os.path.exists(j['out'])]
+    log(f'{len(jobs)} files in shard {i}/{n}; {len(todo)} to write, '
+        f'{workers} workers')
+    failed, t0 = {}, time.time()
+    if workers > 1:
+        import multiprocessing as mp
+        pool = mp.get_context('fork').Pool(workers, maxtasksperchild=8)
+        results = pool.imap_unordered(_run_job, todo)
+    else:
+        pool, results = None, map(_run_job, todo)
+    for k, (out, dt, err) in enumerate(results, 1):
+        if err:
+            failed[out] = err
+        log(f'[{k}/{len(todo)}] {dt:6.1f}s {"FAILED " + err if err else "ok"} '
+            f'{out}')
+    if pool is not None:
+        pool.close()
+        pool.join()
+    log(f'done in {time.time() - t0:.0f}s: {len(todo) - len(failed)} written, '
+        f'{len(failed)} failed')
+    return failed
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ['campaign']:
+        ap = argparse.ArgumentParser(
+            prog='python -m pimm_data.supera_labl campaign',
+            description=write_campaign.__doc__.split('\n\n')[0])
+        ap.add_argument('data_root')
+        ap.add_argument('out_root')
+        ap.add_argument('--readouts', nargs='+', default=['wire', 'pixel'])
+        ap.add_argument('--workers', type=int, default=1)
+        ap.add_argument('--shard', default='0/1', help='I/N (Slurm array)')
+        ap.add_argument('--overwrite', action='store_true')
+        a = ap.parse_args(argv[1:])
+        i, n = (int(x) for x in a.shard.split('/'))
+        failed = write_campaign(a.data_root, a.out_root, a.readouts,
+                                workers=a.workers, shard=(i, n),
+                                overwrite=a.overwrite,
+                                log=lambda m: print(m, flush=True))
+        return 1 if failed else 0
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('supera')
     ap.add_argument('hits')

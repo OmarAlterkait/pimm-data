@@ -603,6 +603,8 @@ class JAXTPCDataset(ShardEventDataset):
                     per_vol[int(k[1:])] = dict(
                         n=len(vd['group_track']),
                         track=vd['group_track'],
+                        ovr=(vd.get('override_group'),
+                             vd.get('override_fragment')),
                         d2g=vd.get('deposit_to_group'),
                         inw=vd.get('deposit_in_window'))
         if hits_raw is not None:
@@ -648,6 +650,10 @@ class JAXTPCDataset(ShardEventDataset):
             group['track'] = row
             group['fragment'] = _resolve._take(trk['fragment'], row, -1) \
                 .astype(np.int32)
+            for v in vols:      # groups of a track pysupera split
+                g, f = per_vol[v].get('ovr', (None, None))
+                if g is not None and len(g):
+                    group['fragment'][np.asarray(g) + base[v]] = f
             group['_roles'].update(track=('ref', 'track'),
                                    fragment=('ref', 'particle'))
             data['track'] = dict(trk, _roles={'fragment': ('ref', 'particle')})
