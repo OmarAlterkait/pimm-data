@@ -296,15 +296,26 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
             gfrag = _to_rows(G(e)['fragment_id'], row_of_id,
                              f'{key} groups/fragment_id')
             voffs = v_off[int(v_idx[e]):int(v_idx[e + 1])]
+            # A volume with no deposits: JAXTPC keeps it (padding group only,
+            # no deposit_to_group); pysupera may drop it (wire) or keep it
+            # (pixel). Map pysupera's volume blocks onto the hits volumes.
+            vols = list(range(n_vol))
             if len(voffs) != n_vol:
-                raise ValueError(f'{key}: {len(voffs)} pysupera volumes, '
-                                 f'{n_vol} in hits')
-            bounds = list(voffs) + [len(gfrag)]
+                vols = [v for v in vols
+                        if 'deposit_to_group' in hev[f'volume_{v}']]
+                if len(voffs) != len(vols):
+                    raise ValueError(f'{key}: {len(voffs)} pysupera volumes, '
+                                     f'{len(vols)} non-empty in hits')
+            bounds = dict(zip(vols, zip(
+                voffs, list(voffs[1:]) + [len(gfrag)])))
             own_t, own_f, own_g, vol_groups = [], [], [], []
             for v in range(n_vol):
                 hv = hev[f'volume_{v}']
-                gv = gfrag[int(bounds[v]):int(bounds[v + 1])]
                 n_groups = len(hv['group_to_track'])     # == attrs n_groups
+                if v in bounds:
+                    gv = gfrag[int(bounds[v][0]):int(bounds[v][1])]
+                else:                                    # dropped: empty
+                    gv = np.full(n_groups, -1, np.int32)
                 if len(gv) != n_groups:
                     raise ValueError(
                         f'{key}/volume_{v}: {len(gv)} groups in pysupera, '
@@ -315,19 +326,23 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 own_g.append(np.flatnonzero(gv >= 0))
                 ov = oev.create_group(f'volume_{v}')
                 vol_groups.append(ov)
-                _create(ov, 'deposit_to_group',
-                        hv['deposit_to_group'][:].astype(np.int32), comp)
+                d2g = (hv['deposit_to_group'][:].astype(np.int32)
+                       if 'deposit_to_group' in hv
+                       else np.zeros(0, np.int32))
+                _create(ov, 'deposit_to_group', d2g, comp)
                 _create(ov, 'group_track',
                         hv['group_to_track'][:].astype(np.int32), comp)
                 if st is not None:
                     sv = st[f'{key}/volume_{v}']
                     if int(st[key].attrs['event_id']) != int(event_ids[e]):
                         raise ValueError(f'{key}: event_id differs in step')
-                    if len(sv['t0_us']) != len(hv['deposit_to_group']):
+                    n_dep = len(sv['t0_us']) if 't0_us' in sv else 0
+                    if n_dep != len(d2g):
                         raise ValueError(f'{key}/volume_{v}: step and hits '
                                          f'deposit counts differ')
                     _create(ov, 'deposit_in_window',
-                            _in_window(sv, win['anode'][v], win), comp)
+                            _in_window(sv, win['anode'][v], win) if n_dep
+                            else np.zeros(0, bool), comp)
 
             # track -> owning fragment, from the owned groups of every volume
             tid, tfrag, over = _track_owner(own_t, own_f)
