@@ -19,14 +19,13 @@ unprefixed keys::
       'sensor': {'coord': (M,D), 'energy': (M,1), 'plane_id': ...,
                  'readout_type': 'wire'|'pixel',
                  'raw': {plane_label: {'wire'|'py'+'pz', 'time', 'value'}}},
-      'hits':   {'coord': (E,D), 'energy': (E,1), 'instance': ..., ...,
+      'hits':   {'coord': (E,D), 'energy': (E,1), 'group': (E,), ...,
                  'readout_type': 'wire'|'pixel',
                  'raw': {plane_label: {'wire'|'py'+'pz', 'time',
                                        'group_id', 'charge'}}},
       'labl':   {'v0': {'track_ids': (T,), 'track_pdg': (T,),
                         'deposit_to_track': (N_v,), ...}, 'v1': {...}},
-      'bridges':{'group_to_track_v0': (G,), 'deposit_to_group_v0': (N_v,),
-                 'qs_fractions_v0': ..., ...},
+      'group':  {'volume': (G,), ...},   # whenever hits is loaded
       'name': str, 'split': str,
     }
 
@@ -48,6 +47,7 @@ from .builder import DATASETS
 from ._dataset_base import ShardEventDataset
 from ._label_decorate import gather_with_fill
 from . import _resolve
+from .transform import ResolveLabels
 from .readers.jaxtpc_step import JAXTPCStepReader
 from .readers.jaxtpc_sensor import JAXTPCSensorReader
 from .readers.jaxtpc_labl import JAXTPCLablReader
@@ -352,6 +352,16 @@ class JAXTPCDataset(ShardEventDataset):
             transform=transform, ignore_index=ignore_index, loop=loop,
         )
 
+        # A ResolveLabels in the per-event pipeline takes over label
+        # resolution (after the point subsample, on the kept points only); it
+        # inherits this dataset's label_key / momentum unless it sets its own.
+        lazy = [t for t in self.transform.transforms
+                if isinstance(t, ResolveLabels)]
+        self._lazy_labels = bool(lazy)
+        for t in lazy:
+            t.label_key = t.label_key or label_key
+            t.momentum = t.momentum or momentum
+
         # Fail fast on empty data_list — otherwise get_data() crashes later
         # with an opaque ZeroDivisionError on `idx % len(self.data_list)`.
         if len(self.data_list) == 0:
@@ -397,9 +407,6 @@ class JAXTPCDataset(ShardEventDataset):
         if self.hits_reader is not None:
             hits_raw = self.hits_reader.read_event(real_idx)
             data['hits'] = self._build_hits_cloud(hits_raw, labl_by_volume)
-            bridges = self._build_bridges(hits_raw)
-            if bridges:
-                data['bridges'] = bridges
 
         if self.sensor_reader is not None:
             data['sensor'] = self._build_sensor_cloud(
@@ -413,7 +420,8 @@ class JAXTPCDataset(ShardEventDataset):
                 self.step_reader.read_event(real_idx), labl_by_volume)
 
         self._build_relations(data, supera, hits_raw)
-        if supera is not None:
+        # A ResolveLabels in the pipeline resolves after the subsample instead
+        if supera is not None and not self._lazy_labels:
             for on in ('step', 'hits'):
                 if on in data:
                     self._resolve_labels(data, on)
@@ -541,24 +549,25 @@ class JAXTPCDataset(ShardEventDataset):
     def _build_hits_cloud(self, hits_raw, labl_by_volume):
         """Merge per-plane hits raw into a point cloud + raw passthrough.
 
-        Attaches ``segment`` when labl available (via group_to_track chain).
-        ``instance`` is always attached (== group_id).
+        The entries' group is ``group`` (a reference into the group part,
+        set in ``_build_relations``), labels or not. ``segment``/``instance``
+        are labels: a track labl file attaches them here (``instance`` = the
+        volume-local group id), a supera labl file in ``_resolve_labels``.
         """
         coord_keys = self._coord_keys()
         planes, coord, energy, plane_id, raw = self._merge_plane_dotted(
             hits_raw, prefix='hits', value_key='charge',
             coord_keys=coord_keys, extra_keys=('group_id',))
-        # instance = per-entry group_id (already int32 from the reader, so
-        # no astype copy needed)
-        instance = (np.concatenate([raw[p]['group_id'] for p in planes], axis=0)
-                    if planes else np.zeros(0, dtype=np.int32))
 
         sub = {
             'coord': coord, 'energy': energy, 'plane_id': plane_id,
-            'instance': instance, 'planes': planes, 'raw': raw,
+            'planes': planes, 'raw': raw,
             'readout_type': self._readout_type,
         }
         if labl_by_volume:
+            instance = (np.concatenate([raw[p]['group_id'] for p in planes])
+                        if planes else np.zeros(0, dtype=np.int32))
+            sub['instance'] = instance
             sub['segment'] = self._decorate_hits_from_labl(
                 planes, raw, hits_raw, labl_by_volume)
             for out, kind, lk in self._track_axes():
@@ -720,14 +729,8 @@ class JAXTPCDataset(ShardEventDataset):
     def _resolve_labels(self, data, on):
         """The PILArNet keys on ``on`` (``_resolve.PRESETS``), plus the bare
         ``segment`` (picked by ``label_key``) and ``instance`` (particle)."""
-        _resolve.resolve(data, on, momentum=self._momentum)
-        sub = data[on]
-        src = _resolve.SEGMENT_OF_LABEL_KEY[self._label_key]
-        sub['segment'] = (
-            _resolve.follow(data, on, ('group', 'fragment',
-                                       'fragment_instance', 'pdg'))
-            .astype(np.int32) if src is None else sub[src][:, 0].copy())
-        sub['instance'] = sub['instance_particle'][:, 0].copy()
+        _resolve.resolve_points(data, on, label_key=self._label_key,
+                                momentum=self._momentum)
 
     def _coord_keys(self):
         """Per-plane column names that build the sensor/hits coord vector."""
@@ -746,24 +749,6 @@ class JAXTPCDataset(ShardEventDataset):
             assert m is not None, k
             by_volume.setdefault(m.group(1), {})[m.group(2)] = v
         return by_volume
-
-    def _build_bridges(self, hits_raw):
-        """Extract per-volume bridge arrays (g2t, deposit_to_group, qs_fractions).
-
-        Under a ``volume=`` filter (F13), keep only that volume's bridges — the
-        hits reader still loads every volume's ``*_v{N}`` tables, but the other
-        volumes' points are not loaded, so carrying their group machinery is
-        wasted payload that confuses downstream consumers."""
-        want = None if self._volume is None else str(self._volume)
-        bridges = {}
-        for k, v in hits_raw.items():
-            if (k.startswith('group_to_track_v')
-                    or k.startswith('deposit_to_group_v')
-                    or k.startswith('qs_fractions_v')):
-                if want is not None and k.rsplit('_v', 1)[1] != want:
-                    continue
-                bridges[k] = v
-        return bridges
 
     # ------------------------------------------------------------------
     # Helpers

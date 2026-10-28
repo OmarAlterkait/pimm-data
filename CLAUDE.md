@@ -40,7 +40,7 @@ readers/ (HDF5 → flat dict)  →  jaxtpc.py / lucid.py (flat → nested)  → 
    subclass `ShardEventDataset` (`_dataset_base.py`). They
    wire together per-modality readers, join `labl` dimension tables onto
    `step`/`hits` point clouds, and emit a **nested** dict keyed by modality
-   (`{'step': {...}, 'hits': {...}, 'labl': {...}, 'bridges': {...}}`).
+   (`{'step': {...}, 'hits': {...}, 'group': {...}, 'labl': {...}}`).
    `get_data(idx)` returns raw numpy; `__getitem__` runs the transform
    pipeline. `OpticalDataset` is single-modality (`sensor`) PMT light: each
    `sensor` row is a waveform **chunk**; the raw samples are a packed **second
@@ -134,8 +134,11 @@ point `segment` and `instance` columns. `('labl',)` alone and
 JAXTPC's FK chain (per volume, suffix `_v{N}`):
 `step deposit → deposit_to_track → labl.track_ids → track_{label_key}`,
 and `hits group → group_to_track → labl.track_ids → track_{label_key}`.
-JAXTPC also returns a top-level `bridges` sub-dict containing
-`group_to_track_v{N}`, `deposit_to_group_v{N}`, `qs_fractions_v{N}`.
+Whenever hits is loaded JAXTPC also returns a `group` part (event-wide JAXTPC
+groups), referenced by `step.group` / `hits.group` (`('ref','group')`) plus
+`step.qs` — the step <-> hits correspondence, labels or not. There is no
+`bridges` part. With a supera `labl`, labels are walks from `group`
+(docs/LABELS.md); a `ResolveLabels` transform after the subsample defers them.
 
 ### Detector-specific quirks
 

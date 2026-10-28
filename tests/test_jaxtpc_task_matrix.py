@@ -2,7 +2,7 @@
 
 Drives the schema defined in pimm-data's refactor: every combination
 produces a nested dict {'step': {...}, 'sensor': {...}, 'hits': {...},
-'labl': {...}, 'bridges': {...}, 'name', 'split'}. Missing modalities
+'labl': {...}, 'group': {...}, 'name', 'split'}. Missing modalities
 have no top-level key. No bare 'coord', no flat namespaced aliases.
 
 Rows cross-reference the modality matrix in README §Modality combinations.
@@ -46,7 +46,7 @@ def _top_keys(d):
 # ---------- Row 1 / 4: SSL raw sensor / real-data inference ----------
 
 def test_row1_ssl_raw_sensor(jaxtpc_data_root):
-    """sensor only — sensor cloud, no bridges, no labl, no labels."""
+    """sensor only — sensor cloud, no group, no labl, no labels."""
     ds = make_ds(jaxtpc_data_root, modalities=('sensor',))
     d = ds.get_data(0)
     assert _top_keys(d) == {'sensor'}
@@ -61,16 +61,14 @@ def test_row1_ssl_raw_sensor(jaxtpc_data_root):
 # ---------- Row 2: SSL on clean inst ----------
 
 def test_row2_ssl_hits(jaxtpc_data_root):
-    """hits only — hits cloud + bridges, no labels."""
+    """hits only — hits cloud + its group reference, no labels."""
     ds = make_ds(jaxtpc_data_root, modalities=('hits',))
     d = ds.get_data(0)
-    assert _top_keys(d) == {'hits', 'bridges', 'group'}
-    _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('instance',))
-    assert 'segment' not in d['hits']
+    assert _top_keys(d) == {'hits', 'group'}
+    _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('group',))
+    assert 'segment' not in d['hits'] and 'instance' not in d['hits']
+    assert set(d['group']) == {'volume', '_roles'}    # nothing above the group
     assert 'raw' in d['hits']
-    # bridges populated (per-volume)
-    assert any(k.startswith('group_to_track_v') for k in d['bridges'])
-    assert any(k.startswith('deposit_to_group_v') for k in d['bridges'])
 
 
 # ---------- Row 3 / 11: SSL on seg / per-deposit regression ----------
@@ -99,12 +97,12 @@ def test_row11_physics_regression(jaxtpc_data_root):
 # ---------- Row 5: sensor + inst (denoising) ----------
 
 def test_row5_denoising(jaxtpc_data_root):
-    """sensor + hits — both clouds in parallel, bridges present, no labels."""
+    """sensor + hits — both clouds in parallel, group present, no labels."""
     ds = make_ds(jaxtpc_data_root, modalities=('sensor', 'hits'))
     d = ds.get_data(0)
-    assert _top_keys(d) == {'sensor', 'hits', 'bridges', 'group'}
+    assert _top_keys(d) == {'sensor', 'hits', 'group'}
     _assert_point_cloud(d['sensor'], expect_dim=2)
-    _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('instance',))
+    _assert_point_cloud(d['hits'], expect_dim=2, extra_required=('group',))
     assert 'segment' not in d['sensor']
     assert 'segment' not in d['hits']
 
@@ -127,7 +125,7 @@ def test_row7_supervised_hits(jaxtpc_data_root):
     ds = make_ds(jaxtpc_data_root, modalities=('hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'hits', 'labl', 'bridges', 'group'}
+    assert _top_keys(d) == {'hits', 'labl', 'group'}
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
     # labl is per-volume
     assert all(vk.startswith('v') for vk in d['labl'])
@@ -156,7 +154,7 @@ def test_row9_2d_end_to_end(jaxtpc_data_root):
                  modalities=('sensor', 'hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'sensor', 'hits', 'labl', 'bridges', 'group'}
+    assert _top_keys(d) == {'sensor', 'hits', 'labl', 'group'}
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
     assert 'segment' not in d['sensor']  # sensor never carries labels
@@ -183,7 +181,7 @@ def test_row13_joint_multitask(jaxtpc_data_root):
                  modalities=('step', 'sensor', 'hits', 'labl'),
                  label_key='pdg')
     d = ds.get_data(0)
-    assert _top_keys(d) == {'step', 'sensor', 'hits', 'labl', 'bridges', 'group'}
+    assert _top_keys(d) == {'step', 'sensor', 'hits', 'labl', 'group'}
     _assert_point_cloud(d['step'], expect_dim=3, labeled=True)
     _assert_point_cloud(d['sensor'], expect_dim=2)
     _assert_point_cloud(d['hits'], expect_dim=2, labeled=True)
@@ -219,8 +217,9 @@ def test_no_bare_coord_anywhere(jaxtpc_data_root):
         assert not bare, f"bare keys {bare} leaked in parts={mods}"
 
 
-def test_bridges_present_iff_inst(jaxtpc_data_root):
-    """'bridges' top-level key present exactly when 'hits' is loaded."""
+def test_group_present_iff_hits(jaxtpc_data_root):
+    """The group part (the step <-> hits correspondence) is there exactly when
+    hits is loaded, labels or not; there is no 'bridges' part."""
     cases = [
         (('step',), False),
         (('sensor',), False),
@@ -232,9 +231,8 @@ def test_bridges_present_iff_inst(jaxtpc_data_root):
     for mods, expect in cases:
         ds = make_ds(jaxtpc_data_root, modalities=mods, label_key='pdg')
         d = ds.get_data(0)
-        has_bridges = 'bridges' in d
-        assert has_bridges == expect, \
-            f"bridges={has_bridges} for {mods}; expected {expect}"
+        assert 'bridges' not in d
+        assert ('group' in d) == expect, f"group for {mods}; expected {expect}"
 
 
 def test_labl_is_per_volume(jaxtpc_data_root):
@@ -269,7 +267,7 @@ def test_sensor_and_hits_raw_are_nested(jaxtpc_data_root):
 # test fails if any future dataset change drifts from the documented matrix.
 
 _MATRIX = [
-    # combo,                                    step sensor hits labl bridges step_seg step_inst hits_seg
+    # combo,                                    step sensor hits labl group step_seg step_inst hits_seg
     (('step',),                                (True, False, False, False, False, False, False, False)),
     (('sensor',),                              (False, True, False, False, False, False, False, False)),
     (('hits',),                                (False, False, True, False, True, False, False, False)),
@@ -291,12 +289,13 @@ def test_combination_matrix(jaxtpc_data_root, combo, flags):
     """Every documented combo matches live output."""
     ds = make_ds(jaxtpc_data_root, modalities=combo, label_key='pdg')
     d = ds.get_data(0)
-    step, sensor, hits, labl, bridges, step_seg, step_inst, hits_seg = flags
+    step, sensor, hits, labl, group, step_seg, step_inst, hits_seg = flags
     assert ('step' in d) == step
     assert ('sensor' in d) == sensor
     assert ('hits' in d) == hits
     assert ('labl' in d) == labl
-    assert ('bridges' in d) == bridges
+    assert ('group' in d) == group
+    assert 'bridges' not in d
     has_step_seg = 'step' in d and 'segment' in d['step']
     has_step_inst = 'step' in d and 'instance' in d['step']
     has_hits_seg = 'hits' in d and 'segment' in d['hits']

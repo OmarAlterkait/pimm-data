@@ -134,24 +134,18 @@ label columns attached when `labl` is in the modalities tuple.
 | FK array | Meaning | Scope |
 |----------|---------|-------|
 | `deposit_to_track` | Step deposit → track ID | Per volume, in `labl` |
-| `deposit_to_group` | Step deposit → hits group ID | Per volume, in `bridges` |
-| `group_to_track`   | Hits group → track ID | Per volume, in `bridges` |
+| `deposit_to_group` | Step deposit → hits group ID | Per volume, in the hits file; loaded as `step.group` |
+| `group_to_track`   | Hits group → track ID | Per volume, in the hits file (supera `labl`: `group_track`) |
 
 All are suffixed `_v{N}` for multi-volume detectors (e.g. `deposit_to_group_v0`).
 
-### The `bridges` dict
+### The `group` part
 
-`bridges` appears as a top-level key only when `hits` is loaded
-(JAXTPC only). It holds the FK arrays linking step, hits, and labl:
-
-```python
-data['bridges'] = {
-    'group_to_track_v0':   (G0,),   # hits group_id → track_id
-    'deposit_to_group_v0': (N_v0,), # step row → hits group_id
-    'qs_fractions_v0':     ...,     # charge-sharing fractions
-    # ... _v1, _v2, etc.
-}
-```
+`group` appears whenever `hits` is loaded (JAXTPC only): one row per JAXTPC
+group, event-wide (`volume`; with a supera `labl` also `track`, `fragment`).
+`step.group` and `hits.group` reference it, and `step.qs` is each deposit's
+share of its group's charge. It is the step <-> hits correspondence, with or
+without labels.
 
 ---
 
@@ -239,7 +233,7 @@ data = ds.get_data(idx)
 #     'sensor':  {...},    # when 'sensor' in modalities
 #     'hits':    {...},    # when 'hits' in modalities
 #     'labl':    {...},    # when 'labl' in modalities
-#     'bridges': {...},    # JAXTPC only, when 'hits' in modalities
+#     'group':   {...},    # JAXTPC only, when 'hits' in modalities
 # }
 ```
 
@@ -274,12 +268,13 @@ data['hits'] = {
     'coord':        (E, D) float32,
     'energy':       (E, 1) float32,
     'plane_id':     (E, 1) int32,
-    'instance':     (E,) int32,        # = group_id
+    'group':        (E,) int32,        # ref -> group
     'planes':       [str, ...],
     'readout_type': 'wire' | 'pixel',
     'raw': {plane_label: {...}},
     # present only when 'labl' is also in modalities:
     'segment':      (E,) int32,        # = track_{label_key} via group_to_track
+    'instance':     (E,) int32,        # track labl: group_id; supera: particle
 }
 
 data['labl'] = {              # keyed by volume
@@ -289,10 +284,8 @@ data['labl'] = {              # keyed by volume
     'v1': {...},
 }
 
-data['bridges'] = {           # only when 'hits' is loaded
-    'group_to_track_v0':   (G0,),
-    'deposit_to_group_v0': (N_v0,),
-    'qs_fractions_v0':     ...,
+data['group'] = {             # only when 'hits' is loaded
+    'volume': (G,) int32,        # + 'track', 'fragment' with a supera labl
 }
 ```
 

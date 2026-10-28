@@ -13,7 +13,7 @@ physics events. It does not, whenever the present-event sets diverge:
 
 Either way a global ``idx`` then resolves to *different physics events* in
 different modalities — silently — corrupting every cross-modality join
-(``deposit_to_track`` / ``group_to_track`` / ``bridges``).
+(``deposit_to_track`` / ``group_to_track`` / ``deposit_to_group``).
 
 :func:`build_joint_index` fixes this for any multimodal dataset: it intersects
 the present event numbers across every loaded modality (per shard) and

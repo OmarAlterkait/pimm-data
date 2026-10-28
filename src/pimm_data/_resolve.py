@@ -157,6 +157,20 @@ def resolve(data, on, preset='pilarnet', momentum='start', keys=None):
     return data
 
 
+def resolve_points(data, on, label_key='pdg', momentum='start', keys=None):
+    """The labels of part ``on``: the preset ``keys`` (None = all, ``()`` =
+    none) plus the bare ``segment`` (picked by ``label_key``) and ``instance``
+    (particle). A no-op when the event has no label tables."""
+    if on not in data or 'particle' not in data or 'group' not in data[on]:
+        return data
+    resolve(data, on, momentum=momentum, keys=keys)
+    src = SEGMENT_OF_LABEL_KEY[label_key]
+    path = _INST + ('pdg',) if src is None else PRESETS['pilarnet'][src][0]
+    data[on]['segment'] = follow(data, on, path).astype(np.int32)
+    data[on]['instance'] = follow(data, on, _INST).astype(np.int32)
+    return data
+
+
 def _last_part(data, on, path):
     target = on
     for name in path[:-1]:

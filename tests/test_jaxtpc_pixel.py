@@ -57,10 +57,16 @@ def test_pixel_hits_coord_is_3d_with_group_id(jaxtpc_pixel_data_root):
         assert plane.endswith('_Pixel')
         cols = s['hits']['raw'][plane]
         assert set(cols.keys()) == {'py', 'pz', 'time', 'charge', 'group_id'}
-    # instance column = group_id, per-entry; must match concatenated raw.
-    expected = np.concatenate(
+    # group = the entry's group_id, offset into the event-wide group part
+    gid = np.concatenate(
         [s['hits']['raw'][p]['group_id'] for p in s['hits']['planes']])
-    np.testing.assert_array_equal(s['hits']['instance'], expected.astype(np.int32))
+    vol = np.concatenate([np.full(len(s['hits']['raw'][p]['group_id']),
+                                  int(p.split('_')[1]))
+                          for p in s['hits']['planes']])
+    base = {v: int(np.argmax(s['group']['volume'] == v)) for v in set(vol)}
+    want = gid + np.array([base[v] for v in vol], dtype=np.int64)
+    np.testing.assert_array_equal(s['hits']['group'], want)
+    assert 'instance' not in s['hits']           # no labels without labl
 
 
 def test_pixel_volume_filter_uses_pixel_plane(jaxtpc_pixel_data_root):

@@ -88,21 +88,17 @@ def test_unknown_modality_raises(jaxtpc_data_root):
         make_ds(jaxtpc_data_root, modalities=('step', 'mystery'))
 
 
-def test_volume_filter_prunes_bridges(tmp_path):
-    """F13: under a volume= filter, bridges carry only that volume's group
-    machinery — not the other volume's (whose points are never loaded)."""
+def test_volume_filter_prunes_groups(tmp_path):
+    """F13: under a volume= filter, the group part holds only that volume's
+    groups — not the other volume's (whose points are never loaded)."""
     from pimm_data.testing import make_jaxtpc_sample
     root = make_jaxtpc_sample(str(tmp_path), n_events=2, n_volumes=2)
     kw = dict(data_root=root, split='', dataset_name='sim',
               modalities=('hits', 'labl'))
-    b_all = JAXTPCDataset(**kw).get_data(0)['bridges']
-    b_v0 = JAXTPCDataset(volume=0, **kw).get_data(0)['bridges']
-    # all-volumes payload spans both volumes...
-    assert any(k.endswith('_v1') for k in b_all)
-    assert any(k.endswith('_v0') for k in b_all)
-    # ...volume=0 payload keeps v0 tables and drops v1 (no orphan machinery).
-    assert any(k.endswith('_v0') for k in b_v0)
-    assert all(not k.endswith('_v1') for k in b_v0)
+    g_all = JAXTPCDataset(**kw).get_data(0)['group']['volume']
+    g_v0 = JAXTPCDataset(volume=0, **kw).get_data(0)['group']['volume']
+    assert set(np.unique(g_all)) == {0, 1}
+    assert set(np.unique(g_v0)) == {0}
 
 
 def test_min_deposits_cached_scan_matches_direct(tmp_path):

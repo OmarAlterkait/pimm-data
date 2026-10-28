@@ -80,6 +80,7 @@ def test_hits_segment_via_g2t_chain(jaxtpc_data_root):
     """
     ds = make_ds(jaxtpc_data_root, ('hits', 'labl'))
     d = ds.get_data(0)
+    hits_raw = ds.hits_reader.read_event(ds.data_list[0])
     seg = d['hits']['segment']
     hits_instance = d['hits']['instance']
     plane_id = d['hits']['plane_id'].ravel()
@@ -93,7 +94,7 @@ def test_hits_segment_via_g2t_chain(jaxtpc_data_root):
         p = planes[int(plane_id[fi])]
         vol_num = p.split('_')[1]
         vkey = f'v{vol_num}'
-        g2t = d['bridges'][f'group_to_track_v{vol_num}']
+        g2t = hits_raw[f'group_to_track_v{vol_num}']
         gid = int(hits_instance[fi])
         if gid < 0 or gid >= len(g2t):
             continue
@@ -114,46 +115,30 @@ def test_hits_segment_via_g2t_chain(jaxtpc_data_root):
             f"hits.segment[{fi}]={seg[fi]}, chain yields {expected}"
 
 
-# --- bridges semantics ---
+# --- the group correspondence (step <-> hits), no labels needed ---
 
-def test_bridges_lengths(jaxtpc_data_root):
-    """group_to_track_vN has G entries; deposit_to_group_vN / qs_fractions_vN
-    have N_v entries (one per step deposit in volume v)."""
+def test_group_refs_without_labels(jaxtpc_data_root):
+    """step + hits alone: every deposit and hit entry references a group row
+    (or -1), and qs splits each group's charge over its deposits."""
     ds = make_ds(jaxtpc_data_root, ('step', 'hits'))
     d = ds.get_data(0)
-    vid = d['step']['volume_id'].ravel()
-    for key in d['bridges']:
-        # Extract volume index from the key suffix
-        vol_num = key.rsplit('_v', 1)[1]
-        arr = d['bridges'][key]
-        if key.startswith('group_to_track_'):
-            # Should be strictly positive number of groups (when not empty)
-            assert arr.ndim == 1
-        elif key.startswith('deposit_to_group_'):
-            n_step_in_vol = int((vid == int(vol_num)).sum())
-            assert arr.shape[0] == n_step_in_vol, \
-                f"{key} len {arr.shape[0]} != step volume rows {n_step_in_vol}"
-        elif key.startswith('qs_fractions_'):
-            n_step_in_vol = int((vid == int(vol_num)).sum())
-            assert arr.shape[0] == n_step_in_vol
-
-
-def test_deposit_to_group_values_are_in_range(jaxtpc_data_root):
-    """For each volume v, every deposit_to_group_vN[i] is either -1 or a
-    valid index into group_to_track_vN."""
-    ds = make_ds(jaxtpc_data_root, ('step', 'hits'))
-    d = ds.get_data(0)
-    for key in list(d['bridges']):
-        if not key.startswith('deposit_to_group_'):
-            continue
-        vol_num = key.rsplit('_v', 1)[1]
-        stg = d['bridges'][key]
-        g2t = d['bridges'][f'group_to_track_v{vol_num}']
-        valid = (stg >= 0) & (stg < len(g2t))
-        mask_neg = stg == -1
-        coverage = int((valid | mask_neg).sum())
-        assert coverage == stg.shape[0], \
-            f"{key}: {stg.shape[0] - coverage} out-of-range group ids"
+    n_groups = len(d['group']['volume'])
+    for on in ('step', 'hits'):
+        ref = d[on]['group']
+        assert ref.shape == (len(d[on]['coord']),)
+        assert ((ref >= -1) & (ref < n_groups)).all()
+        assert d[on]['_roles']['group'] == ('ref', 'group')
+        # a group's points lie in that group's volume
+        own = ref >= 0
+        vol = (d[on]['volume_id'].ravel() if on == 'step' else
+               np.array([int(p.split('_')[1]) for p in d[on]['planes']])
+               [d[on]['plane_id'].ravel()])
+        assert (d['group']['volume'][ref[own]] == vol[own]).all()
+    if 'qs' in d['step']:
+        ref = d['step']['group']
+        tot = np.bincount(ref[ref >= 0], weights=d['step']['qs'][ref >= 0, 0],
+                          minlength=n_groups)
+        assert np.allclose(tot[np.unique(ref[ref >= 0])], 1.0, atol=1e-4)
 
 
 # --- sensor is always label-free ---
@@ -169,21 +154,19 @@ def test_sensor_carries_no_labels(jaxtpc_data_root):
         assert 'instance' not in d['sensor'], f"sensor got instance in {mods}"
 
 
-# --- bridges presence iff inst ---
+# --- group presence iff hits ---
 
-def test_bridges_lifecycle(jaxtpc_data_root):
-    """bridges appears exactly when hits is loaded. Labl alone does not add it."""
+def test_group_lifecycle(jaxtpc_data_root):
+    """The group part appears exactly when hits is loaded (hits carries the
+    group ids and deposit_to_group); labl alone does not add it."""
     for mods in [('step',), ('sensor',), ('step', 'labl'), ('step', 'sensor')]:
-        ds = make_ds(jaxtpc_data_root, mods)
-        d = ds.get_data(0)
-        assert 'bridges' not in d, f"unexpected bridges for {mods}"
+        d = make_ds(jaxtpc_data_root, mods).get_data(0)
+        assert 'group' not in d and 'bridges' not in d, mods
     for mods in [('hits',), ('sensor', 'hits'), ('hits', 'labl'),
                  ('step', 'hits'), ('step', 'hits', 'labl'),
                  ('step', 'sensor', 'hits', 'labl')]:
-        ds = make_ds(jaxtpc_data_root, mods)
-        d = ds.get_data(0)
-        assert 'bridges' in d, f"bridges missing for {mods}"
-        assert any(k.startswith('group_to_track_v') for k in d['bridges'])
+        d = make_ds(jaxtpc_data_root, mods).get_data(0)
+        assert 'group' in d and 'bridges' not in d, mods
 
 
 # --- label absence ---

@@ -110,6 +110,21 @@ table columns (`particle.motif`, `pid`, `is_primary`, `momentum_*`,
 `interaction.vertex`), computed when loading, never stored. Point subsamples
 slice the references with their points and never touch the tables.
 
+Without `labl`, the `group` part still exists whenever hits is loaded (only
+`volume`), with `step.group`, `step.qs` and `hits.group`. That is the step <-> hits
+correspondence: hits give each readout entry's group and `deposit_to_group`, so the
+group is the shared key, label-free. Nothing above the group appears. There is no
+`bridges` part; its arrays were duplicates of these references.
+
+Per-point labels are a broadcast of group-level answers, and that broadcast is most
+of the cost of an event (1M wire: 142 of 188 MB on the points, 1.2 of 1.3 s of
+`get_data`). Put `dict(type='ResolveLabels', keys=...)` after the subsample (top
+level, not inside `Apply`) and the dataset skips it; the transform writes
+`segment`, `instance` and the preset `keys` (default all, `()` for just the pair)
+for the kept points only, with the dataset's `label_key`/`momentum`. Same values as
+the eager path. On one 1M wire event with a 3 mm `GridSample`: `get_data` 1.32 s ->
+0.12 s, the whole item 1.81 s -> 0.76 s (0.55 s with `keys=()`).
+
 ## Verified facts that set the key list
 
 | fact | consequence |
