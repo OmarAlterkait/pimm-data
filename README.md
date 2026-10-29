@@ -29,9 +29,9 @@ pip install -e /path/to/pimm-data
 from pimm_data import JAXTPCDataset
 
 ds = JAXTPCDataset(data_root="/path/to/jaxtpc_data", split="", modalities=("step",),
-                   labels="motif")
+                   labels=("segment_motif", "instance_fragment"))
 sample = ds.get_data(0)          # numpy arrays, no transforms
-print(sample["step"].keys())     # coord, energy, volume_id, segment, instance, ...
+print(sample["step"].keys())     # coord, energy, group, segment_motif, instance_fragment, ...
 ```
 
 ### Load a LUCiD dataset
@@ -69,14 +69,14 @@ ds = JAXTPCDataset(
     data_root="/path/to/jaxtpc_data",
     split="",
     modalities=("step",),
-    labels="motif",                     # read labl; segment = motif class
+    labels=("segment_motif",),          # read labl; per-point motif class
     transform=[
         dict(type="Apply", on="step", transforms=[
             dict(type="GridSample", grid_size=0.5, mode="train",
                  return_grid_coord=True),
         ]),
         dict(type="Collect", parts={
-            "step": dict(keys=("coord", "grid_coord", "segment"),
+            "step": dict(keys=("coord", "grid_coord", "segment_motif"),
                          feat_keys=("coord", "energy"))}),
     ],
 )
@@ -97,11 +97,11 @@ batch = next(iter(loader))
 > sit directly in `data_root/step/` with no split subdirectory, pass
 > `split=''`.
 
-> **`labels=`** reads `labl` and attaches `segment`/`instance` (JAXTPC:
-> `labels='motif'|'pid'|'pdg'` picks the `segment` class, `instance=` the id level
-> (`'particle'`, `'fragment'`, `'interaction'`), and
-> `label_keys=` adds further per-point keys; LUCiD: `labels=True`). For JAXTPC
-> `labl` is not a modality (see docs/LABELS.md).
+> **`labels=`** reads `labl`. JAXTPC: name the per-point labels wanted —
+> classes `segment_motif`, `segment_pid`, `segment_pdg`; ids `instance_fragment`,
+> `instance_particle`, `instance_interaction`; `is_primary`, `momentum`, `vertex`
+> (or `'all'`) — the PILArNet key names; `Collect` picks the training target.
+> LUCiD: `labels=True` attaches `segment`/`instance`. See docs/LABELS.md.
 
 ---
 
@@ -251,9 +251,8 @@ data['step'] = {
     # hits loaded or labels= set:
     'group':    (N,) int32,     # ref -> group (-1: no group)
     'qs':       (N, 1) float32, # share of its group's charge
-    # labels= only:
-    'segment':  (N,) int32,     # labels= class (motif, pid, pdg, ...)
-    'instance': (N,) int32,     # particle (instance) row
+    # labels= only, the names asked for, each (N, 1):
+    'segment_motif': ..., 'instance_particle': ..., ...
 }
 
 data['sensor'] = {
@@ -272,9 +271,7 @@ data['hits'] = {
     'group':        (E,) int32,        # ref -> group
     'planes':       [str, ...],
     'readout_type': 'wire' | 'pixel',
-    # labels= only:
-    'segment':      (E,) int32,
-    'instance':     (E,) int32,
+    # labels= only, as for step
 }
 
 data['group'] = {             # hits loaded or labels= set
@@ -339,7 +336,7 @@ need per-vertex grouping.
 
 | Dataset | Modality | `instance` = |
 |---------|----------|-------------|
-| JAXTPC  | both     | `instance=`: particle (default) or fragment row of `data['particle']`, or `data['interaction']` row |
+| JAXTPC  | both     | named: `instance_fragment` / `instance_particle` (rows of `data['particle']`), `instance_interaction` |
 | LUCiD   | both     | `particle_idx` (FK into labl.particle) |
 
 If a task needs uniform instance convention, remap in a transform.
@@ -348,10 +345,10 @@ If a task needs uniform instance convention, remap in a transform.
 
 | Dataset | Source | Values |
 |---------|--------|------------|
-| JAXTPC  | `labels=` | motif / PID classes, or raw PDG (`'pdg'`) |
+| JAXTPC  | named | `segment_motif`, `segment_pid`, raw `segment_pdg` |
 | LUCiD   | `labl.particle.category` | Detector-specific category integers |
 
-Use `RemapSegment` to map raw values (e.g. `labels='pdg'`) to dense class indices:
+Use `RemapSegment` to map raw values (e.g. `segment_pdg`, with `key=`) to dense class indices:
 
 ```python
 dict(type='RemapSegment', scheme='motif_5cls')
@@ -592,9 +589,8 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 | `modalities` | tuple | `('step',)` | Subset of `'step'`, `'sensor'`, `'hits'` |
 | `dataset_name` | str | `'sim'` | File prefix (matches `sim_step_*.h5`) |
 | `volume` | int/None | `None` | Single-volume filter. `None` = all volumes. |
-| `labels` | str/None | `None` | Read `labl`; `segment` class = `'motif'`, `'pid'` or `'pdg'` |
-| `instance` | str | `'particle'` | With `labels=`: `instance` = `'particle'`, `'fragment'` or `'interaction'` id |
-| `label_keys` | tuple/`'all'` | `()` | Further per-point keys from `_resolve.PRESETS['pilarnet']` |
+| `labels` | tuple/str/None | `None` | Read `labl`; the per-point labels to write (PILArNet names, or `'all'`) |
+| `le_is_stuff` | bool | `True` | Low-energy scatters keep their class, get no fragment/particle instance |
 | `momentum` | str | `'start'` | `momentum` key: `|p|` at creation or first visible step (`'first'`) |
 | `min_deposits` | int | `0` | Drop events with fewer deposits |
 | `include_physics` | bool | `True` | Load dx, theta, phi, charge, photons, t0_us |

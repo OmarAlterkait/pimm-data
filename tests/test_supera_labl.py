@@ -72,8 +72,8 @@ def test_rows_point_where_the_ids_pointed(built):
 
 def test_dataset_labels_match_supera(built):
     root, supera, hits, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
-                       modalities=('step', 'hits'))
+    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
+                       modalities=('step', 'hits'), le_is_stuff=False)
     assert len(ds) == N_EVENTS
     with h5py.File(supera) as su, \
             h5py.File(hits, 'r', libver='latest', swmr=True) as hi:
@@ -124,9 +124,6 @@ def test_dataset_labels_match_supera(built):
                                           np.concatenate(exp_m))
             np.testing.assert_array_equal(s['instance_particle'][:, 0],
                                           np.concatenate(exp_i))
-            np.testing.assert_array_equal(s['segment'], s['segment_motif'][:, 0])
-            np.testing.assert_array_equal(s['instance'],
-                                          s['instance_particle'][:, 0])
             # instances: muon (row 0) -> 2, photon (1) -> 0, le (2) -> 5
             pid = s['segment_pid'][:, 0]
             inst = s['instance_particle'][:, 0]
@@ -169,14 +166,33 @@ def test_misaligned_event_id_raises(built, tmp_path):
         write_labl(bad, hits, str(tmp_path / 'out.h5'))
 
 
-def test_label_key_pdg_keeps_remap_configs_working(built):
+def test_le_is_stuff(built):
+    """Low-energy points keep their class but are no fragment or particle
+    instance; they stay in their interaction."""
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='pdg', label_keys='all',
-                       modalities=('step',))
+    kw = dict(data_root=root, files=files, labels='all',
+              modalities=('step', 'hits'))
+    things = JAXTPCDataset(**kw).get_data(0)
+    every = JAXTPCDataset(le_is_stuff=False, **kw).get_data(0)
+    for on in ('step', 'hits'):
+        t, e = things[on], every[on]
+        le = e['segment_motif'][:, 0] == 4
+        assert le.any() and (~le & (e['instance_fragment'][:, 0] >= 0)).any()
+        for k in ('instance_fragment', 'instance_particle'):
+            assert (t[k][le] == -1).all()
+            np.testing.assert_array_equal(t[k][~le], e[k][~le])
+        for k in ('segment_motif', 'segment_pid', 'instance_interaction'):
+            np.testing.assert_array_equal(t[k], e[k])
+
+
+def test_segment_pdg_is_the_instances_pdg(built):
+    root, _, _, _, files = built
+    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
+                       modalities=('step',), le_is_stuff=False)
     s = ds.get_data(0)['step']
     inst = s['instance_particle'][:, 0]
-    assert set(np.unique(s['segment'][inst == 0])) == {13}
-    assert set(np.unique(s['segment'][inst < 0])) <= {-1}
+    assert set(np.unique(s['segment_pdg'][inst == 0, 0])) == {13}
+    assert set(np.unique(s['segment_pdg'][inst < 0, 0])) <= {-1}
 
 
 def test_keys_stay_aligned_through_sampling_and_collate(built):
@@ -187,7 +203,7 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
     keys = ('segment_motif', 'segment_pid', 'instance_particle',
             'instance_interaction', 'is_primary', 'momentum', 'vertex')
     ds = JAXTPCDataset(
-        data_root=root, files=files, labels='motif', label_keys='all', modalities=('step',),
+        data_root=root, files=files, labels='all', modalities=('step',),
         transform=[
             dict(type='Apply', on='step', transforms=[
                 dict(type='GridSample', grid_size=200.0, hash_type='fnv',
@@ -197,7 +213,7 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
             ]),
             dict(type='ToTensor'),
             dict(type='Collect', part='step',
-                 keys=('coord', 'grid_coord', 'segment', 'instance') + keys,
+                 keys=('coord', 'grid_coord') + keys,
                  feat_keys=('coord', 'energy')),
         ])
     raw = ds.get_data(0)['step']
@@ -221,8 +237,8 @@ def test_refs_shift_through_collate_and_split(built):
     from pimm_data import collate_fn, split_event
     from pimm_data.transform import Compose
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
-                       modalities=('step',))
+    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
+                       modalities=('step',), le_is_stuff=False)
     pipe = Compose([dict(type='Collect', parts={
         'step': dict(keys=('coord', 'group')),
         'group': dict(keys=('fragment', 'volume'),
@@ -256,7 +272,7 @@ def test_qs_is_derived_from_step_charge(built):
     """step.qs is each deposit's share of its group's step charge; it sums to
     one per group and needs nothing from the hits file."""
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
+    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
                        modalities=('step',))
     s = ds.get_data(0)['step']
     g, qs, q = s['group'], s['qs'][:, 0], s['charge'][:, 0]
@@ -278,7 +294,7 @@ def test_groups_without_labl_for_matching(built):
     assert set(x['group']) == {'volume', '_roles'}
     for part in ('step', 'hits'):
         assert x[part]['_roles']['group'] == ('ref', 'group')
-        assert 'segment' not in x[part]
+        assert not [k for k in x[part] if k.startswith('segment')]
     assert not {'particle', 'interaction'} & set(x)
 
 
@@ -322,7 +338,7 @@ def test_deposit_in_window(built, tmp_path):
         inw = np.concatenate(got_all)
         assert 0 < inw.mean() < 1           # the window splits the sample
     files = dict(files, labl=labl)
-    x = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
+    x = JAXTPCDataset(data_root=root, files=files, labels='all',
                       modalities=('step',)).get_data(0)
     assert np.all(np.diff(x['step']['volume_id'].ravel()) >= 0)
     np.testing.assert_array_equal(x['step']['in_window'][:, 0], inw)
@@ -370,6 +386,6 @@ def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
     assert (task_dir / 'hits').is_symlink()
     assert got.stat().st_mtime == mtime
     ds = JAXTPCDataset(data_root=str(out / 'jaxtpc_wire'), runs='j*/*',
-                       labels='motif', label_keys='all', modalities=('step', 'hits'))
+                       labels='all', modalities=('step', 'hits'))
     assert len(ds) == N_EVENTS
     assert 'segment_motif' in ds.get_data(0)['hits']

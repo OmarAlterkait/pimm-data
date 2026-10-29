@@ -2,11 +2,13 @@
 
 Point clouds are the modalities asked for. ``group`` (the JAXTPC group, the
 key step and hits share) exists whenever something defines it: hits, or
-labl. The label tables and per-point ``segment``/``instance`` come with
-``labels=`` only, and only on step/hits. No bare top-level point keys.
+labl. The label tables and the named per-point labels come with ``labels=``
+only, and only on step/hits. No bare top-level point keys.
 """
 
 from itertools import combinations
+
+import numpy as np
 
 import pytest
 
@@ -26,7 +28,7 @@ def _cases():
     for mods in COMBOS:
         yield mods, None
         if {'step', 'hits'} & set(mods):
-            yield mods, 'motif'
+            yield mods, ('segment_motif', 'instance_fragment')
 
 
 @pytest.mark.parametrize('mods,labels', list(_cases()), ids=str)
@@ -43,9 +45,10 @@ def test_matrix(jaxtpc_data_root, mods, labels):
         n = len(sub['coord'])
         assert sub['coord'].shape == (n, dim) and sub['energy'].shape == (n, 1)
         labelled = labels is not None and part != 'sensor'
-        assert ('segment' in sub) == labelled == ('instance' in sub)
-        if labelled:
-            assert sub['segment'].shape == sub['instance'].shape == (n,)
+        named = {k for k in sub if k.startswith(('segment', 'instance'))}
+        assert named == (set(labels) if labelled else set())
+        for k in named:
+            assert sub[k].shape == (n, 1)
         if part != 'sensor':
             assert ('group' in sub) == grouped
             if grouped:
@@ -56,40 +59,42 @@ def test_matrix(jaxtpc_data_root, mods, labels):
 
 
 @pytest.mark.parametrize('kw,match', [
-    (dict(modalities=('sensor',), labels='motif'), 'neither'),
+    (dict(modalities=('sensor',), labels='segment_motif'), 'neither'),
     (dict(modalities=('step', 'labl')), 'Unknown'),
     (dict(modalities=()), 'empty'),
-    (dict(modalities=('step',), labels='cluster'), 'labels='),
-    (dict(modalities=('step',), labels='particle'), 'labels='),
-    (dict(modalities=('step',), labels='motif', instance='track'), 'instance='),
-    (dict(modalities=('step',), label_keys='all'), 'need labels='),
-    (dict(modalities=('step',), instance='fragment'), 'need labels='),
-    (dict(modalities=('step',), labels='motif', label_keys=('x',)), 'label_keys'),
-    (dict(modalities=('step',), labels='motif', momentum='end'), 'momentum'),
+    (dict(modalities=('step',), labels='motif'), 'labels='),
+    (dict(modalities=('step',), labels=()), 'labels='),
+    (dict(modalities=('step',), momentum='first'), 'needs labels='),
+    (dict(modalities=('step',), labels='momentum', momentum='end'), 'momentum'),
 ])
 def test_rejected(jaxtpc_data_root, kw, match):
     with pytest.raises(ValueError, match=match):
         JAXTPCDataset(data_root=jaxtpc_data_root, split='', **kw)
 
 
-@pytest.mark.parametrize('instance,key', [
-    ('particle', 'instance_particle'), ('fragment', 'instance_fragment'),
-    ('interaction', 'instance_interaction')])
-def test_instance_levels(jaxtpc_data_root, instance, key):
-    s = make_ds(jaxtpc_data_root, ('step', 'hits'), labels='motif',
-                instance=instance, label_keys='all').get_data(0)
+def test_labels_are_exactly_what_is_asked(jaxtpc_data_root):
+    one = make_ds(jaxtpc_data_root, ('step', 'hits'),
+                  labels='segment_pid').get_data(0)
+    every = make_ds(jaxtpc_data_root, ('step', 'hits'),
+                    labels='all').get_data(0)
     for on in ('step', 'hits'):
-        assert (s[on]['instance'] == s[on][key][:, 0]).all()
-        assert (s[on]['segment'] == s[on]['segment_motif'][:, 0]).all()
+        assert {k for k in one[on] if k.startswith(('segment', 'instance'))} \
+            == {'segment_pid'}
+        assert {'segment_motif', 'segment_pid', 'segment_pdg',
+                'instance_fragment', 'instance_particle',
+                'instance_interaction', 'is_primary', 'momentum',
+                'vertex'} <= set(every[on])
+        # a label does not depend on which others were asked for
+        assert (one[on]['segment_pid'] == every[on]['segment_pid']).all()
 
 
-def test_label_keys_add_only_what_is_asked(jaxtpc_data_root):
-    few = make_ds(jaxtpc_data_root, ('step',), labels='pid',
-                  label_keys=('momentum',)).get_data(0)['step']
-    assert {k for k in few if k.startswith(('segment', 'instance'))} \
-        == {'segment', 'instance'} and 'momentum' in few
-    every = make_ds(jaxtpc_data_root, ('step',), labels='pid',
-                    label_keys='all').get_data(0)['step']
-    assert {'segment_motif', 'segment_pid', 'instance_particle',
-            'instance_interaction', 'is_primary', 'momentum',
-            'vertex'} <= set(every)
+def test_pid_is_constant_on_particles_motif_on_fragments(jaxtpc_data_root):
+    """The panoptic pairs: a class is a property of one instance level."""
+    s = make_ds(jaxtpc_data_root, ('step',), labels='all',
+                le_is_stuff=False).get_data(0)['step']
+    for cls, inst in (('segment_motif', 'instance_fragment'),
+                      ('segment_pid', 'instance_particle'),
+                      ('segment_pid', 'instance_fragment')):
+        c, i = s[cls][:, 0], s[inst][:, 0]
+        for r in np.unique(i[i >= 0]):
+            assert len(np.unique(c[i == r])) == 1, (cls, inst, r)

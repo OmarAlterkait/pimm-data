@@ -26,7 +26,8 @@ import torch
 from pimm_data import JAXTPCDataset, collate_fn
 
 # --- frozen fingerprints (captured from current behavior, synthetic seed=0) ---
-# Labels re-captured when they became pysupera's (labl from supera_labl).
+# Labels re-captured when they became pysupera's named labels (low-energy
+# scatters are stuff: no particle instance).
 # value = (shape, dtype, sha1(bytes)[:16]) for arrays; repr(...) for metadata.
 C1_BATCH = {
     'coord': ((240, 3), 'float32', 'ec942392e142f1f7'),
@@ -40,13 +41,13 @@ C2_BATCH = {
     'feat':  ((240, 4), 'float32', '8194f574fbe936da'),
     'name':  "['sim_step_0000.h5_evt000', 'sim_step_0000.h5_evt001']",
     'offset': ((2,), 'int64', '2bf2fc17c20c1d7d'),
-    'segment': ((240,), 'int32', 'c235d52f825dea91'),
+    'segment_pdg': ((240, 1), 'int32', 'c235d52f825dea91'),
     'split': "['', '']",
 }
-STEP_SEG = ((120,), 'int32', '60804b51265fa5c1')
-STEP_INST = ((120,), 'int32', 'c8313b3ee3c79b25')
-HITS_SEG = ((240,), 'int32', '6b86958984a415c3')
-HITS_INST = ((240,), 'int32', 'f538ccbea2450a42')
+STEP_SEG = ((120, 1), 'int32', '60804b51265fa5c1')
+STEP_INST = ((120, 1), 'int32', '8bbd4f196b6a4c62')
+HITS_SEG = ((240, 1), 'int32', '6b86958984a415c3')
+HITS_INST = ((240, 1), 'int32', '69bd8e79ac65a146')
 
 
 def _fp(x):
@@ -94,22 +95,24 @@ def test_pf1_c1_step_ssl_batch(jaxtpc_data_root, jaxtpc_is_synthetic):
 
 
 def test_pf1_c2_step_seg_batch(jaxtpc_data_root, jaxtpc_is_synthetic):
-    ds = _ds(jaxtpc_data_root, ('step',), labels='pdg',
+    ds = _ds(jaxtpc_data_root, ('step',), labels='segment_pdg',
              transform=[dict(type='Collect', part='step',
-                             keys=('coord', 'segment'),
+                             keys=('coord', 'segment_pdg'),
                              feat_keys=('coord', 'energy'))])
     batch = collate_fn([ds[0], ds[1]])
     _assert(_fps(batch), C2_BATCH, jaxtpc_is_synthetic)
 
 
 def test_pf1_label_decoration_parity(jaxtpc_data_root, jaxtpc_is_synthetic):
-    step = _ds(jaxtpc_data_root, ('step',), labels='pdg').get_data(0)['step']
-    hits = _ds(jaxtpc_data_root, ('hits',), labels='pdg').get_data(0)['hits']
+    lab = ('segment_pdg', 'instance_particle')
+    step = _ds(jaxtpc_data_root, ('step',), labels=lab).get_data(0)['step']
+    hits = _ds(jaxtpc_data_root, ('hits',), labels=lab).get_data(0)['hits']
     if jaxtpc_is_synthetic:
-        assert _fp(step['segment']) == STEP_SEG
-        assert _fp(step['instance']) == STEP_INST
-        assert _fp(hits['segment']) == HITS_SEG
-        assert _fp(hits['instance']) == HITS_INST
+        assert _fp(step['segment_pdg']) == STEP_SEG
+        assert _fp(step['instance_particle']) == STEP_INST
+        assert _fp(hits['segment_pdg']) == HITS_SEG
+        assert _fp(hits['instance_particle']) == HITS_INST
     else:
-        assert _structural(_fp(step['segment'])) == _structural(STEP_SEG)
-        assert _structural(_fp(hits['instance'])) == _structural(HITS_INST)
+        assert _structural(_fp(step['segment_pdg'])) == _structural(STEP_SEG)
+        assert _structural(_fp(hits['instance_particle'])) == \
+            _structural(HITS_INST)

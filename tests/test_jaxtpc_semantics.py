@@ -57,7 +57,7 @@ def test_hits_group_is_the_files_group_id(jaxtpc_data_root):
 def test_labl_gives_steps_their_group_without_hits(jaxtpc_data_root):
     """labl carries deposit_to_group, so step + labels has the group too."""
     a = make_ds(jaxtpc_data_root, ('step', 'hits')).get_data(0)
-    b = make_ds(jaxtpc_data_root, ('step',), labels='motif').get_data(0)
+    b = make_ds(jaxtpc_data_root, ('step',), labels='segment_motif').get_data(0)
     np.testing.assert_array_equal(a['step']['group'], b['step']['group'])
 
 
@@ -70,8 +70,8 @@ def test_plane_id_is_dense_index(jaxtpc_data_root):
 
 def test_volume_filter_shrinks_everything(jaxtpc_data_root):
     mods = ('step', 'sensor', 'hits')
-    a = make_ds(jaxtpc_data_root, mods, labels='motif').get_data(0)
-    b = make_ds(jaxtpc_data_root, mods, labels='motif', volume=0).get_data(0)
+    a = make_ds(jaxtpc_data_root, mods, labels='segment_motif').get_data(0)
+    b = make_ds(jaxtpc_data_root, mods, labels='segment_motif', volume=0).get_data(0)
     for on in mods:
         assert len(b[on]['coord']) < len(a[on]['coord']), on
     assert set(np.unique(a['group']['volume'])) == {0, 1}

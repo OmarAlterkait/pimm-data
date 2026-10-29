@@ -115,13 +115,17 @@ def add_vocabulary(data):
 
 _INST = ('group', 'fragment', 'fragment_instance')
 
-#: out key -> (path, fill). ``{momentum}`` is ``start`` or ``first``.
+#: out key -> (path, fill). ``{momentum}`` is ``start`` or ``first``. The
+#: names are the PILArNet keys pimm's heads and evaluators read; classes are
+#: ``segment_*``, ids ``instance_*`` (rows of ``particle``, or of
+#: ``interaction`` for ``instance_interaction``).
 PRESETS = {
     'pilarnet': {
-        'instance_fragment': (('group', 'fragment'), -1),
         'segment_motif': (('group', 'fragment', 'motif'), -1),
-        'instance_particle': (_INST, -1),
         'segment_pid': (_INST + ('pid',), -1),
+        'segment_pdg': (_INST + ('pdg',), -1),     # raw, for RemapSegment
+        'instance_fragment': (('group', 'fragment'), -1),
+        'instance_particle': (_INST, -1),
         'instance_interaction': (_INST + ('interaction',), -1),
         'is_primary': (_INST + ('is_primary',), -1),
         'momentum': (_INST + ('momentum_{momentum}',), -1.0),
@@ -129,25 +133,29 @@ PRESETS = {
     },
 }
 
-# The bare ``segment`` (a class) and ``instance`` (an id): name -> walk.
-SEGMENTS = {'motif': PRESETS['pilarnet']['segment_motif'][0],
-            'pid': PRESETS['pilarnet']['segment_pid'][0],
-            'pdg': _INST + ('pdg',)}          # the instance's raw PDG
-INSTANCES = {'particle': _INST,
-             'fragment': ('group', 'fragment'),
-             'interaction': _INST + ('interaction',)}
+#: Instance keys that low-energy scatters (motif ``le``) are not instances of
+#: when they are stuff: a fragment or particle of LE points is not an object.
+#: Interactions keep them (an LE scatter still belongs to its interaction).
+STUFF_INSTANCES = ('instance_fragment', 'instance_particle')
+_MOTIF_LE = MOTIF_NAMES.index('le')
 
 
-def resolve(data, on, preset='pilarnet', momentum='start', keys=None):
-    """Write the preset's keys onto part ``on`` as ``(N, 1)`` (vertex
-    ``(N, 3)``). NaN in a table (no visible step) becomes the fill."""
+def resolve(data, on, keys, preset='pilarnet', momentum='start',
+            le_is_stuff=True):
+    """Write the preset's ``keys`` onto part ``on`` as ``(N, 1)`` (vertex
+    ``(N, 3)``). NaN in a table (no visible step) becomes the fill. With
+    ``le_is_stuff``, points of low-energy scatters get -1 in
+    :data:`STUFF_INSTANCES` (they keep their class). A no-op on an event
+    without label tables."""
     if momentum not in ('start', 'first'):
         raise ValueError(f"momentum={momentum!r}: use 'start' or 'first'")
+    if on not in data or 'particle' not in data or 'group' not in data[on]:
+        return data
     add_vocabulary(data)
     sub = data[on]
-    for out, (path, fill) in PRESETS[preset].items():
-        if keys is not None and out not in keys:
-            continue
+    le = None
+    for out in keys:
+        path, fill = PRESETS[preset][out]
         path = tuple(p.format(momentum=momentum) for p in path)
         if path[-1] not in data[_last_part(data, on, path)]:
             continue          # the table lacks the column (e.g. no vertex)
@@ -156,23 +164,12 @@ def resolve(data, on, preset='pilarnet', momentum='start', keys=None):
             v = np.nan_to_num(v, nan=fill).astype(np.float32)
         else:
             v = v.astype(np.int32)
+        if le_is_stuff and out in STUFF_INSTANCES:
+            if le is None:
+                le = follow(data, on, PRESETS[preset]['segment_motif'][0]) \
+                    == _MOTIF_LE
+            v[le] = -1
         sub[out] = v if v.ndim == 2 else v[:, None]
-    return data
-
-
-def resolve_points(data, on, segment='motif', instance='particle',
-                   momentum='start', keys=None):
-    """The labels of part ``on``: the bare ``segment`` (a :data:`SEGMENTS`
-    class) and ``instance`` (an :data:`INSTANCES` id), plus the preset
-    ``keys`` (None = all, ``()`` = none). A no-op when the event has no label
-    tables."""
-    if on not in data or 'particle' not in data or 'group' not in data[on]:
-        return data
-    resolve(data, on, momentum=momentum, keys=keys)
-    add_vocabulary(data)
-    data[on]['segment'] = follow(data, on, SEGMENTS[segment]).astype(np.int32)
-    data[on]['instance'] = follow(data, on, INSTANCES[instance]) \
-        .astype(np.int32)
     return data
 
 

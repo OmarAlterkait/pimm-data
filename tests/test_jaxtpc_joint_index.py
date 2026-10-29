@@ -38,7 +38,7 @@ _ALL = ('step', 'sensor', 'hits')
 
 def test_no_gap_all_modalities_aligned(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
     assert len(ds) == 3
     _assert_aligned(ds)
     # get_data must succeed and stay FK-consistent for every idx.
@@ -56,7 +56,7 @@ def test_gap_in_one_modality_realigns(tmp_path):
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
         del f['entry_000001']                       # present in step/hits/labl
 
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
     # Joint = intersection = {0, 2}; entry_000001 dropped from EVERY modality.
     assert len(ds) == 2
     for r in _readers(ds):
@@ -102,7 +102,7 @@ def test_min_deposits_desync_realigns(tmp_path):
         for vk in [k for k in evt if k.startswith('volume_')]:
             evt[vk].attrs['n_actual'] = 0
 
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif',
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif',
                        min_deposits=1)
     assert len(ds) == 2
     for r in _readers(ds):
@@ -119,7 +119,7 @@ def test_min_deposits_desync_realigns(tmp_path):
 def test_min_deposits_without_step_raises(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=2)
     with pytest.raises(ValueError, match="min_deposits"):
-        JAXTPCDataset(data_root=root, split='', modalities=('hits',), labels='motif',
+        JAXTPCDataset(data_root=root, split='', modalities=('hits',), labels='segment_motif',
                       min_deposits=5)
 
 
@@ -153,8 +153,8 @@ def test_strict_lengths_raises_on_cross_modality_drop(tmp_path):
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
         del f['entry_000001']
     with pytest.raises(ValueError):
-        JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif',
+        JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif',
                       strict_lengths=True)
     # Default (non-strict) just warns and proceeds.
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
     assert len(ds) == 2

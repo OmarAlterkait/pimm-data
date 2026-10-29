@@ -22,7 +22,7 @@ def test_labels_no_warn_when_all_decoratable(jaxtpc_data_root):
     import warnings as _w
     with _w.catch_warnings():
         _w.simplefilter('error')                 # any warning -> failure
-        _jds(jaxtpc_data_root, ('step',), labels='pdg').get_data(0)
+        _jds(jaxtpc_data_root, ('step',), labels='segment_pdg').get_data(0)
 
 
 def test_lucid_labels_param_matches_legacy(lucid_data_root):
@@ -50,14 +50,14 @@ def test_namespaced_multimodality_collect(jaxtpc_data_root):
     from pimm_data import collate_fn
     ds = JAXTPCDataset(
         data_root=jaxtpc_data_root, split='', dataset_name='sim',
-        modalities=('step', 'sensor'), labels='pdg', min_deposits=0, max_len=2,
+        modalities=('step', 'sensor'), labels='segment_pdg', min_deposits=0, max_len=2,
         transform=[dict(type='Collect', parts={
-            'step':   dict(keys=('coord', 'segment'), feat_keys=('coord', 'energy')),
+            'step':   dict(keys=('coord', 'segment_pdg'), feat_keys=('coord', 'energy')),
             'sensor': dict(keys=('wire', 'time', 'value', 'plane_gid')),
         })])
     batch = collate_fn([ds[0], ds[1]])
 
-    assert {'step_coord', 'step_segment', 'step_feat', 'step_offset',
+    assert {'step_coord', 'step_segment_pdg', 'step_feat', 'step_offset',
             'sensor_wire', 'sensor_time', 'sensor_value', 'sensor_plane_gid',
             'sensor_offset', 'name', 'split', '_roles'} <= set(batch)
     assert 'sensor_coord' not in batch and 'sensor_raw' not in batch   # junk gone
@@ -81,9 +81,9 @@ def test_sensor_consumed_sparse_no_densify(jaxtpc_data_root):
     from pimm_data import collate_fn
     ds = JAXTPCDataset(
         data_root=jaxtpc_data_root, split='', dataset_name='sim',
-        modalities=('step', 'sensor'), labels='pdg', min_deposits=0, max_len=2,
+        modalities=('step', 'sensor'), labels='segment_pdg', min_deposits=0, max_len=2,
         transform=[dict(type='Collect', parts={
-            'step':   dict(keys=('coord', 'segment'), feat_keys=('coord', 'energy')),
+            'step':   dict(keys=('coord', 'segment_pdg'), feat_keys=('coord', 'energy')),
             'sensor': dict(keys=('coord',), feat_keys=('coord', 'energy')),
         })])
     batch = collate_fn([ds[0], ds[1]])

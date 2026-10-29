@@ -22,7 +22,8 @@ _SSL = {'global_coord', 'global_offset', 'global_feat',
 # (recipe, train-spec overrides for the tiny fixture, required flat keys)
 _JAXTPC = [
     ('jaxtpc/semseg_5cls.py', dict(min_deposits=0),
-     {'step_coord', 'step_grid_coord', 'step_segment', 'step_feat', 'step_offset'}),
+     {'step_coord', 'step_grid_coord', 'step_segment_motif', 'step_feat',
+      'step_offset'}),
     ('jaxtpc/ssl_step.py', dict(min_deposits=0), _SSL),
     ('jaxtpc/ssl_sensor.py', dict(), _SSL),
 ]

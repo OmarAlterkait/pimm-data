@@ -25,18 +25,29 @@ def _ds(root, modalities, **kw):
     return JAXTPCDataset(**defaults)
 
 
+_LABELS = ('segment_pdg', 'instance_particle')
+# what a config's Copy does for transforms that read the bare segment/instance
+_TO_BARE = dict(type='Copy', keys_dict=dict(segment_pdg='segment',
+                                            instance_particle='instance'))
+
+
+def _bare(d, on):
+    d[on] = TRANSFORMS.build(_TO_BARE)(d[on])
+    return d
+
+
 @pytest.fixture(scope='module')
 def step_sample(jaxtpc_data_root):
     """A 3D step sub-dict with labels (step.coord shape (N,3))."""
-    ds = _ds(jaxtpc_data_root, ('step',), labels='pdg')
-    return ds.get_data(0)
+    return _bare(_ds(jaxtpc_data_root, ('step',), labels=_LABELS).get_data(0),
+                 'step')
 
 
 @pytest.fixture(scope='module')
 def hits_sample(jaxtpc_data_root):
     """A 2D hits sub-dict with labels (hits.coord shape (E,2))."""
-    ds = _ds(jaxtpc_data_root, ('hits',), labels='pdg')
-    return ds.get_data(0)
+    return _bare(_ds(jaxtpc_data_root, ('hits',), labels=_LABELS).get_data(0),
+                 'hits')
 
 
 @pytest.fixture(scope='module')
@@ -241,9 +252,10 @@ def test_random_rotate_on_2d_fails(hits_sample):
 def test_recipe_3d_supervised_step(jaxtpc_data_root):
     """Canonical 3D semantic seg pipeline — the one in
     configs/detector/_base_/jaxtpc_step.py."""
-    ds = _ds(jaxtpc_data_root, ('step',), labels='pdg',
+    ds = _ds(jaxtpc_data_root, ('step',), labels=_LABELS,
              transform=[
                  dict(type='Apply', on='step', transforms=[
+                     _TO_BARE,
                      dict(type='RemapSegment', scheme='motif_5cls'),
                      dict(type='NormalizeCoord', center=[0, 0, 0], scale=4000.0),
                      dict(type='LogTransform', min_val=0.01, max_val=20.0),
@@ -266,9 +278,10 @@ def test_recipe_3d_supervised_step(jaxtpc_data_root):
 
 def test_recipe_2d_supervised_hits(jaxtpc_data_root):
     """2D supervised-on-hits pipeline (hits+labl combo)."""
-    ds = _ds(jaxtpc_data_root, ('hits',), labels='pdg',
+    ds = _ds(jaxtpc_data_root, ('hits',), labels=_LABELS,
              transform=[
                  dict(type='Apply', on='hits', transforms=[
+                     _TO_BARE,
                      dict(type='RemapSegment', scheme='motif_5cls'),
                      dict(type='GridSample', grid_size=1.0, hash_type='fnv',
                           mode='train', return_grid_coord=True),

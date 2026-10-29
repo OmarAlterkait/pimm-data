@@ -132,9 +132,11 @@ JAXTPC: modalities are `step`/`sensor`/`hits`. Whenever hits is loaded or
 referenced by `step.group` / `hits.group` (`('ref','group')`) plus `step.qs` —
 the step <-> hits correspondence, labels or not. `labels=` reads the `labl`
 file (pysupera's labels, written by `supera_labl.py`) into `track`,
-`particle`, `interaction` parts and puts `segment`/`instance` on step/hits
-points; `label_keys=` adds more per-point keys (each a lookup over every
-point). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
+`particle`, `interaction` parts and writes the named per-point labels asked
+for on step/hits (PILArNet names: `segment_motif|pid|pdg`,
+`instance_fragment|particle|interaction`, `is_primary`, `momentum`,
+`vertex`, or `'all'`); `Collect` picks the target. Low-energy scatters are
+stuff by default (`le_is_stuff`). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
 `step`/`hits`; `('labl',)` and `('sensor', 'labl')` are rejected there.
 
 ### Detector-specific quirks
@@ -143,9 +145,9 @@ point). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
   sensor/hits HDF5. Coord dimensionality and the per-volume plane filter
   (`volume=N`) depend on it — see `jaxtpc.py:_coord_keys` and the post-
   detection plane-filter block in `__init__`.
-- **`labels`** (JAXTPC) picks the `segment` class: `'motif'`, `'pid'`, `'pdg'`
-  (raw; use `RemapSegment` for class indices). `instance=` picks the id level:
-  `'particle'` (default), `'fragment'`, `'interaction'`.
+- **`labels`** (JAXTPC) names per-point labels; there is no bare
+  `segment`/`instance`. A transform that reads the bare key (`RemapSegment`
+  takes `key=`) gets it from `Copy(keys_dict=...)`.
 - **LUCiD** requires `format_version >= 3` shards. `instance` is
   `particle_idx`; `segment` is `labl.particle.category`.
 - **Optical** (`optical.py`, `readers/optical_sensor.py`) reads goop PMT-light

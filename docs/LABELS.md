@@ -104,11 +104,22 @@ particle: labl columns            fragment/instance/fragment_instance/parent/
 interaction: labl columns
 ```
 
-`JAXTPCDataset(labels=...)` reads `labl` and writes two keys on each step / hits
-point: `segment`, the class (`'motif'`, `'pid'` or `'pdg'`), and `instance`, the id
-at the level `instance=` names (`'particle'`, the default; `'fragment'`; `'interaction'`). Any other key from `_resolve.PRESETS` is
-opt-in through `label_keys=`, because each one is a lookup over every point: on a
-1M wire event, all eight cost 0.98 s of `get_data`, the two defaults 0.26 s.
+`JAXTPCDataset(labels=...)` reads `labl` and writes the per-point labels it names,
+under the PILArNet keys pimm's heads read: classes `segment_motif`, `segment_pid`,
+`segment_pdg`; ids `instance_fragment`, `instance_particle`, `instance_interaction`;
+`is_primary`, `momentum`, `vertex`. None of them is "the" target: `Collect` picks.
+Each is a lookup over every point, so a pipeline asks only for what it uses (1M
+wire: all nine cost about 1 s of `get_data`, one or two about 0.25 s).
+
+Panoptic pairs follow the levels a class belongs to (5 real events, wire and pixel):
+motif is constant on every fragment but mixed on a third of the non-LE particles
+(a muon's track, deltas and Michel); PID is constant on fragments and particles;
+the interaction has no class yet. So: `segment_motif` + `instance_fragment`,
+`segment_pid` + `instance_particle`, class-agnostic `instance_interaction`.
+Low-energy scatters (94% of fragments, 83-88% of particles, 7% of the energy) are
+stuff by default, as in PILArNet: they keep their class and get -1 in
+`instance_fragment` / `instance_particle`, not in `instance_interaction`
+(`le_is_stuff=False` keeps them as instances).
 Object-level targets (momentum, vertex, primary) are better read from the
 `particle` / `interaction` tables through `group` than broadcast to points.
 
@@ -268,7 +279,5 @@ table), and `instance` becomes the particle row.
 
 ## Open
 
-- Whether low-energy-scatter instances (about 86% of instance rows) count as instances
-  or as stuff in panoptic metrics; PILArNet treats them as stuff.
 - Which momentum is the default `momentum` gather: `|start_mom|` (creation) or
   `|first_mom|` (first visible step). Both are stored.

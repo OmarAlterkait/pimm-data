@@ -76,19 +76,19 @@ def test_end_to_end_transform_collate(jaxtpc_data_root):
         ]),
         dict(type='ToTensor'),
         dict(type='Collect', part='step',
-             keys=('coord', 'grid_coord', 'segment'),
+             keys=('coord', 'grid_coord', 'segment_pdg'),
              feat_keys=('coord', 'energy')),
     ]
     ds = JAXTPCDataset(data_root=jaxtpc_data_root, split='',
                        dataset_name='sim',
-                       modalities=('step',), labels='pdg',
+                       modalities=('step',), labels='segment_pdg',
                        min_deposits=50, max_len=4, transform=transform)
     batch = collate_fn([ds[0], ds[1]])
     assert batch['coord'].shape[1] == 3
     assert 'offset' in batch
     assert len(batch['offset']) == 2
     assert 'feat' in batch
-    assert 'segment' in batch
+    assert batch['segment_pdg'].shape == (len(batch['coord']), 1)
 
 
 def test_dataset_getitem_uses_transforms(jaxtpc_data_root):

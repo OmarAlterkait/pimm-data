@@ -30,16 +30,16 @@ def roots(tmp_path_factory):
 
 def _assert_same(a, b):
     for part in ('step', 'hits'):
-        for k in ('coord', 'energy', 'group', 'segment', 'instance',
+        for k in ('coord', 'energy', 'group', 'segment_pdg',
                   'instance_fragment'):
             np.testing.assert_array_equal(a[part][k], b[part][k])
 
 
 def test_runs_nested_pattern_reads_same_events(roots):
     src, dst, _ = roots
-    f1 = JAXTPCDataset(data_root=src, split='', labels='pdg', label_keys=('instance_fragment',),
+    f1 = JAXTPCDataset(data_root=src, split='', labels=('segment_pdg', 'instance_fragment'),
                        modalities=('step', 'hits'))
-    f2 = JAXTPCDataset(data_root=dst, runs='j*/*', labels='pdg', label_keys=('instance_fragment',),
+    f2 = JAXTPCDataset(data_root=dst, runs='j*/*', labels=('segment_pdg', 'instance_fragment'),
                        modalities=('step', 'hits'))
     assert len(f1) == len(f2) == 2 * N_EVENTS
     for i in range(len(f1)):
@@ -49,9 +49,9 @@ def test_runs_nested_pattern_reads_same_events(roots):
 def test_files_per_modality(roots):
     src, dst, _ = roots
     files = {m: os.path.join(dst, 'j*', '*', m, '*.h5') for m in MODS}
-    f1 = JAXTPCDataset(data_root=src, split='', labels='pdg', label_keys=('instance_fragment',),
+    f1 = JAXTPCDataset(data_root=src, split='', labels=('segment_pdg', 'instance_fragment'),
                        modalities=('step', 'hits'))
-    f2 = JAXTPCDataset(data_root=dst, files=files, labels='pdg', label_keys=('instance_fragment',),
+    f2 = JAXTPCDataset(data_root=dst, files=files, labels=('segment_pdg', 'instance_fragment'),
                        modalities=('step', 'hits'))
     assert len(f2) == len(f1)
     for i in range(len(f1)):
@@ -61,7 +61,7 @@ def test_files_per_modality(roots):
 def test_files_must_cover_every_modality(roots):
     _, dst, _ = roots
     with pytest.raises(ValueError, match='missing'):
-        JAXTPCDataset(data_root=dst, labels='pdg', label_keys=('instance_fragment',),
+        JAXTPCDataset(data_root=dst, labels=('segment_pdg', 'instance_fragment'),
                       files={'step': os.path.join(dst, '*', '*', 'step', '*')},
                       modalities=('step', 'hits'))
 

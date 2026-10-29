@@ -1,8 +1,9 @@
 """Data-loader recipe — JAXTPC 3D semantic segmentation (motif 5-class).
 
-CAMPAIGN.md row: JAXTPC | 3D semantic seg | modalities=('step',), labels='motif'.
+CAMPAIGN.md row: JAXTPC | 3D semantic seg | modalities=('step',),
+labels=('segment_motif',).
 
-``labels='motif'`` is pysupera's fragment class (shower, track, michel,
+``segment_motif`` is pysupera's fragment class (shower, track, michel,
 delta, le) — already the 5 dense classes, so no RemapSegment.
 
 This file is the **data-loading half** (new flat-prefixed API: Apply(on=) +
@@ -11,7 +12,7 @@ when lifted into a pimm training config (see CAMPAIGN.md — DefaultSegmentorV2 
 PT-v3m2, in_channels=4).
 
 Expected batch after collate_fn([ds[i], ...]):
-    step_coord (N,3)  step_grid_coord (N,3)  step_segment (N,)
+    step_coord (N,3)  step_grid_coord (N,3)  step_segment_motif (N,1)
     step_feat (N,4)=[coord|energy]  step_offset (B,)  name  split  _roles
 """
 import os
@@ -34,7 +35,7 @@ _aug = [
     dict(type="RandomFlip", p=0.5),
 ]
 _collect = dict(type="Collect", parts={
-    "step": dict(keys=("coord", "grid_coord", "segment"),
+    "step": dict(keys=("coord", "grid_coord", "segment_motif"),
                  feat_keys=("coord", "energy"))})
 
 train_transform = [dict(type="Apply", on="step", transforms=_geom + _aug), _collect]
@@ -45,10 +46,10 @@ data = dict(
     ignore_index=-1,
     names=["shower", "track", "michel", "delta", "le"],
     train=dict(type="JAXTPCDataset", data_root=_data_root, split="train",
-               dataset_name="sim", modalities=("step",), labels="motif",
+               dataset_name="sim", modalities=("step",), labels=("segment_motif",),
                transform=train_transform, min_deposits=1024, max_len=-1),
     val=dict(type="JAXTPCDataset", data_root=_data_root, split="val",
-             dataset_name="sim", modalities=("step",), labels="motif",
+             dataset_name="sim", modalities=("step",), labels=("segment_motif",),
              transform=test_transform, min_deposits=1024, max_len=1000),
 )
 

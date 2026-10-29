@@ -64,7 +64,7 @@ def test_pixel_hits_coord_is_3d_with_group_id(jaxtpc_pixel_data_root):
     base = {v: int(np.argmax(s['group']['volume'] == v)) for v in set(vol)}
     want = gid + np.array([base[v] for v in vol], dtype=np.int64)
     np.testing.assert_array_equal(s['hits']['group'], want)
-    assert 'instance' not in s['hits']           # no labels without labl
+    assert not [k for k in s['hits'] if k.startswith(('segment', 'instance'))]
 
 
 def test_pixel_volume_filter_uses_pixel_plane(jaxtpc_pixel_data_root):
@@ -81,16 +81,17 @@ def test_pixel_volume_filter_uses_pixel_plane(jaxtpc_pixel_data_root):
 def test_pixel_labl_decoration(jaxtpc_pixel_data_root):
     ds = JAXTPCDataset(
         data_root=jaxtpc_pixel_data_root, split='',
-        modalities=('step', 'hits'), labels='pdg')
+        modalities=('step', 'hits'),
+        labels=('segment_pdg', 'instance_particle'))
     s = ds[0]
     # step and hits gain instance/segment through their group
-    assert 'instance' in s['step']
-    assert 'segment' in s['step']
-    assert 'segment' in s['hits']
-    assert s['hits']['segment'].shape == (s['hits']['coord'].shape[0],)
+    assert 'instance_particle' in s['step']
+    assert 'segment_pdg' in s['step']
+    assert 'segment_pdg' in s['hits']
+    assert s['hits']['segment_pdg'].shape == (s['hits']['coord'].shape[0], 1)
     # not all -1 (synth fixture guarantees matched FKs)
-    assert (s['hits']['segment'] != -1).any()
-    assert (s['step']['segment'] != -1).any()
+    assert (s['hits']['segment_pdg'] != -1).any()
+    assert (s['step']['segment_pdg'] != -1).any()
 
 
 def test_pixel_sensor_values_decode_to_float32(jaxtpc_pixel_data_root):
