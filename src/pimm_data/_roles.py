@@ -129,13 +129,15 @@ def parts_from_keys(keys, roles=None):
     """
     sub = subspace_offset_keys(keys, roles)
     suf = '_offset'
-    return {k[:-len(suf)] for k in keys
-            if k.endswith(suf) and k not in sub}
+    parts = {k[:-len(suf)] for k in keys if k.endswith(suf) and k not in sub}
+    if 'offset' in keys:
+        parts.add('')                 # the bare (single-part) form's one part
+    return parts
 
 
 def part_of(key, parts):
     """Longest-prefix-match: the part a flat key belongs to (or None = whole-event)."""
-    cands = [p for p in parts if key == p or key.startswith(p + '_')]
+    cands = [p for p in parts if p and (key == p or key.startswith(p + '_'))]
     return max(cands, key=len) if cands else None
 
 

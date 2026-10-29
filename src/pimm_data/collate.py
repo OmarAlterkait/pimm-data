@@ -29,11 +29,14 @@ def collate_with_roles(samples):
     keys = [k for k in samples[0] if k != '_roles']
     parts = _roles.parts_from_keys(keys, roles)
     col = lambda key: [s[key] for s in samples]
-    offs = lambda part: [s[f'{part}_offset'] for s in samples]
+    # the bare form's part is '' and its offset is plain 'offset'
+    okey = lambda part: f'{part}_offset' if part else 'offset'
+    offs = lambda part: [s[okey(part)] for s in samples]
+    owner = lambda key: _roles.part_of(key, parts) or ('' if '' in parts else None)
     out = {}
     for key in keys:
         spec = roles.get(key)
-        if key.endswith('_offset'):
+        if key == 'offset' or key.endswith('_offset'):
             out[key] = _roles.cat_offset(col(key)); continue
         kind = _roles.role_kind(spec) if spec is not None else None
         if kind == _roles.EVENT:
@@ -41,17 +44,17 @@ def collate_with_roles(samples):
         elif kind == 'edge':
             tgt = spec[1]
             if tgt == 'self':
-                out[key] = _roles.cat_edge_self(col(key), offs(_roles.part_of(key, parts)))
+                out[key] = _roles.cat_edge_self(col(key), offs(owner(key)))
             else:
                 src, dst = tgt
                 out[key] = _roles._shift_concat(col(key), offs(src), offs(dst))
         elif kind == 'label':
             out[key] = _roles.cat_label_col(col(key))
         elif kind == 'ref':
-            if f'{spec[1]}_offset' not in samples[0]:
+            if okey(spec[1]) not in samples[0]:
                 raise KeyError(
                     f"collate: {key!r} references part {spec[1]!r}, which was "
-                    f"not collected; add it to Collect(parts=...).")
+                    f"not collected; collect both with Collect(parts=...).")
             out[key] = _roles.cat_ref(col(key), offs(spec[1]))
         elif kind in (_roles.POINT, _roles.RAW, 'instance'):
             out[key] = _roles.cat_point(col(key))
@@ -91,7 +94,8 @@ def mix_pairs(batch):
                          f"events merged into one; drop them or mix_prob=0.")
     out = dict(batch)
     for k, v in batch.items():
-        if k.endswith('_offset') and isinstance(v, torch.Tensor) and len(v) > 1:
+        if (k == 'offset' or k.endswith('_offset')) \
+                and isinstance(v, torch.Tensor) and len(v) > 1:
             out[k] = torch.cat([v[1:-1:2], v[-1:]])
     return out
 

@@ -128,14 +128,29 @@ def test_mix_merges_pairs_by_roles(jaxtpc_data_root):
     assert g.max() < len(mixed['group_volume'])
 
 
-def test_mix_refuses_what_it_cannot_merge(jaxtpc_data_root):
+def test_bare_collect_batches_like_the_namespaced_form(jaxtpc_data_root):
+    """Collect(part=) (bare keys, pimm's configs) carries roles too: instance
+    ids are compacted and batch-unique, and mixing merges pairs; only a
+    pipeline that never Collects refuses mix_prob."""
     import pytest as _pt
+    import torch
     from pimm_data import collate_fn
-    bare = make_ds(jaxtpc_data_root, ('step',), transform=[
-        dict(type='Collect', part='step', keys=('coord',),
-             feat_keys=('coord',))])
+    lab = ('segment_motif', 'instance_particle')
+    tf = [dict(type='Collect', part='step', keys=('coord',) + lab,
+               feat_keys=('coord', 'energy'))]
+    bare = make_ds(jaxtpc_data_root, ('step',), labels=lab, transform=tf)
+    ns = make_ds(jaxtpc_data_root, ('step',), labels=lab, transform=[
+        dict(type='Collect', parts={'step': dict(keys=('coord',) + lab,
+                                                 feat_keys=('coord', 'energy'))})])
+    ev_b, ev_n = [bare[i] for i in range(2)], [ns[i] for i in range(2)]
+    for mix in (0, 1.0):
+        b, n = collate_fn(ev_b, mix_prob=mix), collate_fn(ev_n, mix_prob=mix)
+        assert torch.equal(b['offset'], n['step_offset'])
+        for k in ('coord', 'feat') + lab:
+            assert torch.equal(b[k], n[f'step_{k}']), (k, mix)
+    raw = make_ds(jaxtpc_data_root, ('step',))
     with _pt.raises(ValueError, match='mix_prob'):
-        collate_fn([bare[0], bare[1]], mix_prob=1.0)
+        collate_fn([dict(raw[0]['step']), dict(raw[1]['step'])], mix_prob=1.0)
 
 
 def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):

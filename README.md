@@ -343,12 +343,12 @@ need per-vertex grouping.
 JAXTPC instance ids are table rows per event (`get_data`): shared by step and
 hits, with gaps; stuff and unowned points are -1. The dataset tags them
 `('label', key)`, so `Collect(parts=...)` + collate compacts them per event and
-makes them unique across the batch (-1 stays -1). The single-part `Collect(part=)`
-form carries no roles: there they stay per-event rows, which per-event losses
-(split by `offset`) accept as they are.
+makes them unique across the batch (-1 stays -1). Both `Collect` forms carry
+roles (the single-part form is one unprefixed part), so batching is the same
+for either.
 
 **Mixing (Mix3D).** `collate_fn(batch, mix_prob=p)` merges events `2i` and `2i+1`
-of a `Collect(parts=...)` batch by their offsets alone, so it works for any keys a
+of a `Collect`-ed batch (either form) by their offsets alone, so it works for any keys a
 pipeline collects. It is correct because of roles: ids that must stay apart are
 `('label', …)` or `('ref', part)` and are batch-unique after collate. A pipeline
 that collects its own ids declares them in `Collect(..., roles=...)`; an id left

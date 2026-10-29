@@ -271,6 +271,12 @@ class Collect(object):
             self.parts_spec = None
             if offset_keys_dict is None:
                 offset_keys_dict = dict(offset="coord")
+            self.roles = dict(kwargs.pop('roles', {}))
+            bad = set(self.roles) - set([keys] if isinstance(keys, str) else keys)
+            if bad:
+                raise ValueError(f"Collect: roles for non-collected keys "
+                                 f"{sorted(bad)} — add them to keys= or drop "
+                                 f"the role.")
             self.keys = keys
             self.offset_keys = offset_keys_dict
             self.part = part
@@ -344,6 +350,21 @@ class Collect(object):
         else:
             source = data_dict[self.part] if self.part is not None else data_dict
             out = self._project(source, self.keys, self.offset_keys, self.kwargs)
+            # The bare form is one part with no prefix; it carries roles like
+            # the namespaced form, so collate (ids, refs, mixing) is the same.
+            # Collected keys are point rows unless the producer or roles= says
+            # otherwise; a producer's second-row-space offset loses the part
+            # prefix with everything else.
+            pfx = f'{self.part}_' if self.part is not None else ''
+            roles = {k: 'point' for k in out if k not in self.offset_keys}
+            for k, r in source.get('_roles', {}).items():
+                if k in out:
+                    if (pfx and isinstance(r, (tuple, list)) and r
+                            and r[0] == 'instance' and str(r[1]).startswith(pfx)):
+                        r = ('instance', r[1][len(pfx):])
+                    roles[k] = r
+            roles.update(self.roles)
+            out['_roles'] = roles
         # G2: name/split are the cross-boundary identity carriers (content-
         # addressed seeding reads top-level ``batch['name']``) — pass them
         # through UNCONDITIONALLY, at the top level, for both forms.
