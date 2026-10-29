@@ -105,8 +105,8 @@ interaction: labl columns
 ```
 
 `JAXTPCDataset(labels=...)` reads `labl` and writes two keys on each step / hits
-point: `segment` (`'motif'`, `'pid'`, `'pdg'`, `'particle'` or `'interaction'`)
-and `instance` (the particle row). Any other key from `_resolve.PRESETS` is
+point: `segment`, the class (`'motif'`, `'pid'` or `'pdg'`), and `instance`, the id
+at the level `instance=` names (`'particle'`, the default; `'fragment'`; `'interaction'`). Any other key from `_resolve.PRESETS` is
 opt-in through `label_keys=`, because each one is a lookup over every point: on a
 1M wire event, all eight cost 0.98 s of `get_data`, the two defaults 0.26 s.
 Object-level targets (momentum, vertex, primary) are better read from the

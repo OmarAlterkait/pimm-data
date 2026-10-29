@@ -129,10 +129,13 @@ PRESETS = {
     },
 }
 
-# ``labels=`` -> the preset key the bare ``segment`` copies; None = raw PDG.
-SEGMENTS = {'pdg': None, 'motif': 'segment_motif',
-                        'pid': 'segment_pid', 'particle': 'instance_particle',
-                        'interaction': 'instance_interaction'}
+# The bare ``segment`` (a class) and ``instance`` (an id): name -> walk.
+SEGMENTS = {'motif': PRESETS['pilarnet']['segment_motif'][0],
+            'pid': PRESETS['pilarnet']['segment_pid'][0],
+            'pdg': _INST + ('pdg',)}          # the instance's raw PDG
+INSTANCES = {'particle': _INST,
+             'fragment': ('group', 'fragment'),
+             'interaction': _INST + ('interaction',)}
 
 
 def resolve(data, on, preset='pilarnet', momentum='start', keys=None):
@@ -157,18 +160,19 @@ def resolve(data, on, preset='pilarnet', momentum='start', keys=None):
     return data
 
 
-def resolve_points(data, on, segment='motif', momentum='start', keys=None):
-    """The labels of part ``on``: the preset ``keys`` (None = all, ``()`` =
-    none) plus the bare ``segment`` (picked by ``segment``, a :data:`SEGMENTS`
-    name) and ``instance``
-    (particle). A no-op when the event has no label tables."""
+def resolve_points(data, on, segment='motif', instance='particle',
+                   momentum='start', keys=None):
+    """The labels of part ``on``: the bare ``segment`` (a :data:`SEGMENTS`
+    class) and ``instance`` (an :data:`INSTANCES` id), plus the preset
+    ``keys`` (None = all, ``()`` = none). A no-op when the event has no label
+    tables."""
     if on not in data or 'particle' not in data or 'group' not in data[on]:
         return data
     resolve(data, on, momentum=momentum, keys=keys)
-    src = SEGMENTS[segment]
-    path = _INST + ('pdg',) if src is None else PRESETS['pilarnet'][src][0]
-    data[on]['segment'] = follow(data, on, path).astype(np.int32)
-    data[on]['instance'] = follow(data, on, _INST).astype(np.int32)
+    add_vocabulary(data)
+    data[on]['segment'] = follow(data, on, SEGMENTS[segment]).astype(np.int32)
+    data[on]['instance'] = follow(data, on, INSTANCES[instance]) \
+        .astype(np.int32)
     return data
 
 

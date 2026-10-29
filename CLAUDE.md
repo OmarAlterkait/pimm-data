@@ -143,8 +143,9 @@ point). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
   sensor/hits HDF5. Coord dimensionality and the per-volume plane filter
   (`volume=N`) depend on it — see `jaxtpc.py:_coord_keys` and the post-
   detection plane-filter block in `__init__`.
-- **`labels`** (JAXTPC) picks `segment`: `'motif'`, `'pid'`, `'pdg'` (raw;
-  use `RemapSegment` for class indices), `'particle'`, `'interaction'`.
+- **`labels`** (JAXTPC) picks the `segment` class: `'motif'`, `'pid'`, `'pdg'`
+  (raw; use `RemapSegment` for class indices). `instance=` picks the id level:
+  `'particle'` (default), `'fragment'`, `'interaction'`.
 - **LUCiD** requires `format_version >= 3` shards. `instance` is
   `particle_idx`; `segment` is `labl.particle.category`.
 - **Optical** (`optical.py`, `readers/optical_sensor.py`) reads goop PMT-light

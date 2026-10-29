@@ -121,12 +121,16 @@ class JAXTPCDataset(ShardEventDataset):
     volume : int or None
         Load only this volume index. ``None`` = all volumes.
     labels : str or None
-        Read ``labl`` and label ``step``/``hits`` points: ``segment`` is
-        ``'motif'`` (shower, track, michel, delta, le), ``'pid'``, ``'pdg'``
-        (the instance's raw PDG), ``'particle'`` or ``'interaction'``;
-        ``instance`` is the particle (instance) row. The tables (``group``,
+        Read ``labl`` and label ``step``/``hits`` points. ``segment`` is the
+        class: ``'motif'`` (shower, track, michel, delta, le), ``'pid'``
+        (photon, electron, muon, pion, proton, le) or ``'pdg'`` (the
+        instance's raw PDG, for ``RemapSegment``). The tables (``group``,
         ``track``, ``particle``, ``interaction``) come with them. ``None``:
         no labl, no labels.
+    instance : str
+        With ``labels=``: what ``instance`` identifies, as a ``particle`` row
+        — ``'particle'`` (default), ``'fragment'`` or ``'interaction'``
+        (an ``interaction`` row).
     label_keys : tuple[str] or 'all'
         Further per-point keys from ``_resolve.PRESETS['pilarnet']``
         (``segment_pid``, ``instance_interaction``, ``momentum``, ``vertex``,
@@ -158,6 +162,7 @@ class JAXTPCDataset(ShardEventDataset):
         dataset_name='sim',
         volume=None,
         labels=None,
+        instance='particle',
         label_keys=(),
         momentum='start',
         min_deposits=0,
@@ -198,6 +203,12 @@ class JAXTPCDataset(ShardEventDataset):
                 raise ValueError(
                     "labels= labels step or hits points; modalities="
                     f"{self._modalities} has neither.")
+            if instance not in _resolve.INSTANCES:
+                raise ValueError(f"instance={instance!r}: use one of "
+                                 f"{sorted(_resolve.INSTANCES)}.")
+        elif label_keys or instance != 'particle' or momentum != 'start':
+            raise ValueError("label_keys=, instance= and momentum= shape the "
+                             "labels; they need labels=.")
         preset = _resolve.PRESETS['pilarnet']
         label_keys = tuple(preset) if label_keys == 'all' else tuple(label_keys)
         unknown = set(label_keys) - set(preset)
@@ -210,6 +221,7 @@ class JAXTPCDataset(ShardEventDataset):
         self._dataset_name = dataset_name
         self._volume = volume
         self._labels = labels
+        self._instance = instance
         self._label_keys = label_keys
         self._momentum = momentum
         self._min_deposits = min_deposits
@@ -359,7 +371,8 @@ class JAXTPCDataset(ShardEventDataset):
                 if on in data:
                     _resolve.resolve_points(
                         data, on, segment=self._labels,
-                        momentum=self._momentum, keys=self._label_keys)
+                        instance=self._instance, momentum=self._momentum,
+                        keys=self._label_keys)
         return data
 
     # ------------------------------------------------------------------

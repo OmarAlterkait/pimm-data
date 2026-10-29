@@ -27,7 +27,7 @@ def test_volume_filter(jaxtpc_data_root):
     assert d_v0['sensor']['coord'].shape[0] < d_all['sensor']['coord'].shape[0]
 
 
-@pytest.mark.parametrize('labels', ['motif', 'pid', 'pdg', 'particle'])
+@pytest.mark.parametrize('labels', ['motif', 'pid', 'pdg'])
 def test_different_labels(jaxtpc_data_root, labels):
     ds = make_ds(jaxtpc_data_root, modalities=('step',), labels=labels)
     d = ds.get_data(0)

@@ -98,7 +98,8 @@ batch = next(iter(loader))
 > `split=''`.
 
 > **`labels=`** reads `labl` and attaches `segment`/`instance` (JAXTPC:
-> `labels='motif'|'pid'|'pdg'|'particle'|'interaction'` picks `segment`, and
+> `labels='motif'|'pid'|'pdg'` picks the `segment` class, `instance=` the id level
+> (`'particle'`, `'fragment'`, `'interaction'`), and
 > `label_keys=` adds further per-point keys; LUCiD: `labels=True`). For JAXTPC
 > `labl` is not a modality (see docs/LABELS.md).
 
@@ -338,7 +339,7 @@ need per-vertex grouping.
 
 | Dataset | Modality | `instance` = |
 |---------|----------|-------------|
-| JAXTPC  | both     | particle (instance) row of `data['particle']` |
+| JAXTPC  | both     | `instance=`: particle (default) or fragment row of `data['particle']`, or `data['interaction']` row |
 | LUCiD   | both     | `particle_idx` (FK into labl.particle) |
 
 If a task needs uniform instance convention, remap in a transform.
@@ -591,7 +592,8 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 | `modalities` | tuple | `('step',)` | Subset of `'step'`, `'sensor'`, `'hits'` |
 | `dataset_name` | str | `'sim'` | File prefix (matches `sim_step_*.h5`) |
 | `volume` | int/None | `None` | Single-volume filter. `None` = all volumes. |
-| `labels` | str/None | `None` | Read `labl`; `segment` = `'motif'`, `'pid'`, `'pdg'`, `'particle'` or `'interaction'` |
+| `labels` | str/None | `None` | Read `labl`; `segment` class = `'motif'`, `'pid'` or `'pdg'` |
+| `instance` | str | `'particle'` | With `labels=`: `instance` = `'particle'`, `'fragment'` or `'interaction'` id |
 | `label_keys` | tuple/`'all'` | `()` | Further per-point keys from `_resolve.PRESETS['pilarnet']` |
 | `momentum` | str | `'start'` | `momentum` key: `|p|` at creation or first visible step (`'first'`) |
 | `min_deposits` | int | `0` | Drop events with fewer deposits |

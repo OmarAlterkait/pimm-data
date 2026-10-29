@@ -60,12 +60,27 @@ def test_matrix(jaxtpc_data_root, mods, labels):
     (dict(modalities=('step', 'labl')), 'Unknown'),
     (dict(modalities=()), 'empty'),
     (dict(modalities=('step',), labels='cluster'), 'labels='),
+    (dict(modalities=('step',), labels='particle'), 'labels='),
+    (dict(modalities=('step',), labels='motif', instance='track'), 'instance='),
+    (dict(modalities=('step',), label_keys='all'), 'need labels='),
+    (dict(modalities=('step',), instance='fragment'), 'need labels='),
     (dict(modalities=('step',), labels='motif', label_keys=('x',)), 'label_keys'),
     (dict(modalities=('step',), labels='motif', momentum='end'), 'momentum'),
 ])
 def test_rejected(jaxtpc_data_root, kw, match):
     with pytest.raises(ValueError, match=match):
         JAXTPCDataset(data_root=jaxtpc_data_root, split='', **kw)
+
+
+@pytest.mark.parametrize('instance,key', [
+    ('particle', 'instance_particle'), ('fragment', 'instance_fragment'),
+    ('interaction', 'instance_interaction')])
+def test_instance_levels(jaxtpc_data_root, instance, key):
+    s = make_ds(jaxtpc_data_root, ('step', 'hits'), labels='motif',
+                instance=instance, label_keys='all').get_data(0)
+    for on in ('step', 'hits'):
+        assert (s[on]['instance'] == s[on][key][:, 0]).all()
+        assert (s[on]['segment'] == s[on]['segment_motif'][:, 0]).all()
 
 
 def test_label_keys_add_only_what_is_asked(jaxtpc_data_root):
