@@ -100,25 +100,42 @@ def test_pid_is_constant_on_particles_motif_on_fragments(jaxtpc_data_root):
             assert len(np.unique(c[i == r])) == 1, (cls, inst, r)
 
 
-def test_mix_collate_keeps_named_instances_apart(jaxtpc_data_root):
-    """point_collate_fn's mix merges event pairs; every instance_* level of
-    the second event moves past the first's ids, -1 stays -1."""
-    import random
+def test_mix_merges_pairs_by_roles(jaxtpc_data_root):
+    """collate_fn(mix_prob) on a Collect-ed batch merges events 2i, 2i+1 by
+    offsets alone; instance ids are label-role, so the pair never shares
+    one, -1 stays -1, and the group refs still point into the merged table."""
     import torch
-    from pimm_data.collate import point_collate_fn
-    lab = ('instance_fragment', 'instance_particle')
-    ds = make_ds(jaxtpc_data_root, ('step',), labels=lab, transform=[
-        dict(type='Collect', part='step', keys=('coord',) + lab,
+    from pimm_data import collate_fn
+    lab = ('segment_motif', 'instance_fragment', 'instance_particle')
+    ds = make_ds(jaxtpc_data_root, ('step', 'hits'), labels=lab, transform=[
+        dict(type='Collect', parts={
+            'step': dict(keys=('coord', 'group') + lab, feat_keys=('coord',)),
+            'group': dict(keys=('volume',), offset_keys_dict=dict(offset='volume')),
+        })])
+    ev = [ds[i] for i in range(2)]
+    plain = collate_fn(ev)
+    mixed = collate_fn(ev, mix_prob=1.0)
+    assert mixed['step_offset'].tolist() == [len(plain['step_coord'])]
+    assert mixed['group_offset'].tolist() == [len(plain['group_volume'])]
+    n0 = int(plain['step_offset'][0])
+    for k in lab[1:]:
+        v = mixed[f'step_{k}'].reshape(-1)
+        a, b = v[:n0], v[n0:]
+        assert not set(a[a >= 0].tolist()) & set(b[b >= 0].tolist())
+        raw = torch.cat([e[f'step_{k}'] for e in ev]).reshape(-1)
+        assert torch.equal(v < 0, raw < 0)
+    g = mixed['step_group']
+    assert g.max() < len(mixed['group_volume'])
+
+
+def test_mix_refuses_what_it_cannot_merge(jaxtpc_data_root):
+    import pytest as _pt
+    from pimm_data import collate_fn
+    bare = make_ds(jaxtpc_data_root, ('step',), transform=[
+        dict(type='Collect', part='step', keys=('coord',),
              feat_keys=('coord',))])
-    a, b = ds[0], ds[1]
-    random.seed(0)
-    m = point_collate_fn([a, b], mix_prob=1.0)
-    n = len(a['coord'])
-    for k in lab:
-        first, second = m[k][:n], m[k][n:]
-        assert torch.equal(first, a[k]) and torch.equal(second < 0, b[k] < 0)
-        assert not set(first[first >= 0].tolist()) & \
-            set(second[second >= 0].tolist())
+    with _pt.raises(ValueError, match='mix_prob'):
+        collate_fn([bare[0], bare[1]], mix_prob=1.0)
 
 
 def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):
@@ -133,8 +150,9 @@ def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):
 
 
 def test_label_role_compacts_instance_rows(jaxtpc_data_root):
-    """Instance ids are particle rows (gaps, per event); a ('label', grp) role
-    in Collect compacts them per event and makes them unique in the batch."""
+    """Instance ids are particle rows per event; their ('label', …) role (the
+    dataset stamps it) makes collate compact them per event and make them
+    unique in the batch, keeping -1."""
     import torch
     from pimm_data import collate_fn
     ds = make_ds(jaxtpc_data_root, ('step',), labels='instance_particle',
@@ -149,3 +167,6 @@ def test_label_role_compacts_instance_rows(jaxtpc_data_root):
     assert set(ids[:n0][ids[:n0] >= 0].tolist()) == set(range(k0))
     rest = ids[n0:][ids[n0:] >= 0]
     assert rest.min() == k0           # the second event follows the first
+    raw = torch.cat([ds[i]['step_instance_particle'] for i in range(2)])
+    assert torch.equal(ids < 0, raw.reshape(-1) < 0)
+    assert ds.get_data(0)['step']['_roles']['instance_particle'][0] == 'label'

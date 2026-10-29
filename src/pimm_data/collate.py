@@ -69,10 +69,40 @@ def collate_with_roles(samples):
     return out
 
 
+def mix_pairs(batch):
+    """Mix3D on a role-collated batch: events ``2i`` and ``2i+1`` become one.
+
+    Merging events is offset bookkeeping only: every ``*_offset`` (each part's
+    and each second row-space's) keeps the end of every pair. It needs nothing
+    from key names, so it holds for any keys a pipeline collects — what makes
+    it correct is the roles. Ids that must stay apart across events are
+    ``('label', …)`` (compacted, batch-unique) or ``('ref', part)`` (shifted to
+    the batch's rows) after collate, so a merged pair never shares one. A
+    ``point``-role column is per-event by contract: an id carried that way
+    would collide, so declare its role in ``Collect``. An event-level tensor
+    (one row per event) has no meaning for a merged pair and is refused.
+    """
+    roles = batch.get('_roles', {})
+    events = [k for k, r in roles.items() if k in batch
+              and r is not None and _roles.role_kind(r) == _roles.EVENT
+              and isinstance(batch[k], torch.Tensor)]
+    if events:
+        raise ValueError(f"mix: event-level keys {events} cannot follow two "
+                         f"events merged into one; drop them or mix_prob=0.")
+    out = dict(batch)
+    for k, v in batch.items():
+        if k.endswith('_offset') and isinstance(v, torch.Tensor) and len(v) > 1:
+            out[k] = torch.cat([v[1:-1:2], v[-1:]])
+    return out
+
+
 def collate_fn(batch, mix_prob=0):
     """
     collate function for point cloud which support dict and list,
     'coord' is necessary to determine 'offset'
+
+    ``mix_prob``: with this probability, a role-collated batch (from
+    ``Collect``) is mixed — see :func:`mix_pairs`.
     """
     if not isinstance(batch, Sequence):
         raise TypeError(f"{batch.dtype} is not supported.")
@@ -84,7 +114,13 @@ def collate_fn(batch, mix_prob=0):
     # commented as "legacy"; making it raise showed 13 tests reach it, so the
     # label was wrong in the direction that invites deletion.
     if isinstance(batch[0], Mapping) and '_roles' in batch[0]:
-        return collate_with_roles(batch)
+        out = collate_with_roles(batch)
+        if mix_prob and random.random() < mix_prob:
+            out = mix_pairs(out)
+        return out
+    if mix_prob:
+        raise ValueError("collate_fn: mix_prob needs a Collect-ed batch (with "
+                         "_roles); point_collate_fn mixes the bare layout.")
 
     if isinstance(batch[0], torch.Tensor):
         return torch.cat(list(batch))
@@ -122,20 +158,16 @@ def point_collate_fn(batch, mix_prob=0):
     )  # currently, only support input_dict, rather than input_list
     batch = collate_fn(batch)
     if random.random() < mix_prob:
-        # every per-point instance id (bare ``instance`` and the named
-        # ``instance_*`` levels): the second event of a mixed pair is shifted
-        # past the first's ids so the two never share one
-        for key in [k for k in batch
-                    if k == "instance" or k.startswith("instance_")]:
+        if "instance" in batch.keys():
             offset = batch["offset"]
             start = 0
             num_instance = 0
             for i in range(len(offset)):
                 if i % 2 == 0:
-                    num_instance = batch[key][start : offset[i]].max() + 1
+                    num_instance = max(batch["instance"][start : offset[i]])
                 if i % 2 != 0:
-                    mask = batch[key][start : offset[i]] != -1
-                    batch[key][start : offset[i]] += num_instance * mask
+                    mask = batch["instance"][start : offset[i]] != -1
+                    batch["instance"][start : offset[i]] += num_instance * mask
                 start = offset[i]
         if "offset" in batch.keys():
             batch["offset"] = torch.cat(
@@ -166,4 +198,4 @@ def inseg_collate_fn(batch, mix_prob=0):
         flattened_batch.extend(item_list)
     
     # Use the original collate function on the flattened batch
-    return collate_fn(flattened_batch)
+    return collate_fn(flattened_batch, mix_prob=mix_prob)

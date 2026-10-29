@@ -340,11 +340,20 @@ need per-vertex grouping.
 | JAXTPC  | both     | named: `instance_fragment` / `instance_particle` (rows of `data['particle']`), `instance_interaction` (rows of `data['interaction']`) |
 | LUCiD   | both     | `particle_idx` (FK into labl.particle) |
 
-JAXTPC instance ids are table rows: stable, shared by step and hits, and they
-index the object tables, but not compacted to `0..K-1` and with gaps (stuff and
-unowned points are -1). Collate keeps them per event (the `offset` separates
-events); give a part `roles={'instance_particle': ('label', 'inst')}` in
-`Collect(parts=...)` for ids compacted per event and unique across the batch.
+JAXTPC instance ids are table rows per event (`get_data`): shared by step and
+hits, with gaps; stuff and unowned points are -1. The dataset tags them
+`('label', key)`, so `Collect(parts=...)` + collate compacts them per event and
+makes them unique across the batch (-1 stays -1). The single-part `Collect(part=)`
+form carries no roles: there they stay per-event rows, which per-event losses
+(split by `offset`) accept as they are.
+
+**Mixing (Mix3D).** `collate_fn(batch, mix_prob=p)` merges events `2i` and `2i+1`
+of a `Collect(parts=...)` batch by their offsets alone, so it works for any keys a
+pipeline collects. It is correct because of roles: ids that must stay apart are
+`('label', …)` or `('ref', part)` and are batch-unique after collate. A pipeline
+that collects its own ids declares them in `Collect(..., roles=...)`; an id left
+`point`-role would collide. Event-level tensors are refused (a merged pair has no
+single value), and `mix_prob` on a batch without roles raises.
 If a task needs uniform instance convention, remap in a transform.
 
 **Segment**:

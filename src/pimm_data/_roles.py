@@ -202,13 +202,17 @@ def cat_label_col(values):
     running distinct-count base. Applied independently per column, this preserves
     the hierarchy (a cluster still maps to one group: within an event the
     cluster→group map is intact, and both columns shift by their own running
-    distinct-count, so the global map stays one-to-one).
+    distinct-count, so the global map stays one-to-one). Negative ids (-1: no id
+    — stuff, unlabelled) stay -1.
     """
     base = 0
     out = []
     for v in values:                          # one event
-        uniq, inv = torch.unique(v, return_inverse=True)
-        out.append(inv + base)
+        keep = v >= 0
+        uniq, inv = torch.unique(v[keep], return_inverse=True)
+        o = torch.full_like(v, -1)
+        o[keep] = (inv + base).to(o.dtype)
+        out.append(o)
         base += int(uniq.numel())
     return torch.cat(out, dim=0)
 

@@ -170,6 +170,11 @@ def resolve(data, on, keys, preset='pilarnet', momentum='start',
                     == _MOTIF_LE
             v[le] = -1
         sub[out] = v if v.ndim == 2 else v[:, None]
+        if out.startswith('instance_'):
+            # a categorical id: collate compacts it per event and makes it
+            # unique across the batch, so merged or batched events never
+            # share one; per event it is a table row until then
+            sub.setdefault('_roles', {})[out] = ('label', out)
     return data
 
 
