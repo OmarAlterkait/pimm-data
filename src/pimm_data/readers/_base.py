@@ -147,8 +147,10 @@ class ShardReaderBase:
 
     def _shard_meta(self, file_idx):
         """Cached metadata of shard ``file_idx``, memoized per path on the
-        reader so the per-event path never stats the file."""
-        cache = self.__dict__.setdefault('_meta_by_path', {})
+        reader so the per-event path never stats the file. The cache's name
+        is this class's own (mangled), so a subclass's attributes can't
+        collide with it."""
+        cache = self.__dict__.setdefault('_ShardReaderBase__shard_meta', {})
         path = self.h5_files[file_idx]
         meta = cache.get(path)
         if meta is None:

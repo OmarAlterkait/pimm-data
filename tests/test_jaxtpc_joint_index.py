@@ -158,3 +158,37 @@ def test_strict_lengths_raises_on_cross_modality_drop(tmp_path):
     # Default (non-strict) just warns and proceeds.
     ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
     assert len(ds) == 2
+
+
+def test_subclass_readers_are_aligned(tmp_path):
+    """A dataset with its own modalities (helix's coeff datasets) gets its
+    readers into the joint index: they come from VALID_MODALITIES, not a
+    fixed list of JAXTPC names."""
+    from pimm_data._dataset_base import ShardEventDataset
+
+    root = make_jaxtpc_sample(str(tmp_path), n_events=3)
+
+    class Coeff(ShardEventDataset):
+        VALID_MODALITIES = ('coeff',)
+
+        def __init__(self):
+            self._strict_lengths = False
+            self.coeff_reader = JAXTPCStepReader(
+                data_root=os.path.join(root, 'step'), split='',
+                dataset_name='sim')
+            self._canonical_reader = self.coeff_reader
+            self._build_joint_index(source_label='Coeff')
+            super().__init__(split='', data_root=root)
+
+        def get_data(self, idx):
+            return self.coeff_reader.read_event(self.data_list[idx])
+
+    ds = Coeff()
+    assert [n for n, _ in ds._readers_named()] == ['coeff']
+    assert len(ds) == 3
+    # the base reader's shard-meta cache is under its own name
+    r = ds.coeff_reader
+    r._meta_by_path = {'subclass': 'state'}
+    r.h5py_worker_init()
+    r._locate_event(0)
+    assert r._meta_by_path == {'subclass': 'state'}

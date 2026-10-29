@@ -152,6 +152,7 @@ class JAXTPCDataset(ShardEventDataset):
 
 
     VALID_MODALITIES = ('step', 'sensor', 'hits')
+    EXTRA_READERS = ('labl',)
 
     def __init__(
         self,

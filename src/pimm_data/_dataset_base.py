@@ -156,12 +156,17 @@ class ShardEventDataset(Dataset):
             raise ValueError("runs= must name at least one run")
         return runs
 
+    #: Readers a dataset opens beyond its modalities (JAXTPC's ``labl``, read
+    #: when labels are asked for), aligned by the joint index like the rest.
+    EXTRA_READERS = ()
+
     def _readers_named(self):
-        """``(name, reader)`` for every open reader, label files included
-        (``labl`` need not be a modality to be read), in a fixed order: the
-        joint index aligns all of them."""
-        return [(m, getattr(self, f'{m}_reader'))
-                for m in ('step', 'sensor', 'hits', 'labl')
+        """``(name, reader)`` for every open ``<name>_reader``: each of
+        ``VALID_MODALITIES`` (a subclass's own included), then
+        ``EXTRA_READERS``. The joint index aligns all of them."""
+        names = dict.fromkeys(tuple(self.VALID_MODALITIES)
+                              + tuple(self.EXTRA_READERS))
+        return [(m, getattr(self, f'{m}_reader')) for m in names
                 if getattr(self, f'{m}_reader', None) is not None]
 
     def _build_joint_index(self, source_label, filter_label=''):

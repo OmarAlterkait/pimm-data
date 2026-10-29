@@ -351,10 +351,10 @@ class RemapSegment:
     """Remap integer values in a segment-like field through a lookup dict.
 
     Motivating case: a class set built from PDG codes. Configure
-    ``JAXTPCDataset`` with ``labels='pdg'`` (so ``segment`` contains the
-    instance's raw PDG code per deposit), then add::
+    ``JAXTPCDataset`` with ``labels=('segment_pdg',)`` (the instance's raw
+    PDG code per point), then add::
 
-        dict(type="RemapSegment", scheme="motif_5cls")
+        dict(type="RemapSegment", key="segment_pdg", scheme="motif_5cls")
 
     or with an explicit map::
 

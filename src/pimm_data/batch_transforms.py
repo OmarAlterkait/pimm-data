@@ -15,8 +15,9 @@ pre-collate) OR the flat collated batch (``<m>_wire/.../offset`` -> ``<m>_dense=
 self-seeds from ``batch['name']`` (+ optional ``batch['_epoch']``/``_rank``).
 
 Each is ``fn(batch) -> batch`` (flat-prefixed keys; ``modality=`` sets the prefix,
-``None`` = bare). :func:`sensor_dense_cfg` returns the standard chain as config;
-:func:`build_sensor_gpu_stages` wraps it in a ``Compose`` you call on the batch.
+``None`` = bare). The post-collate tail of a transform list (everything after
+the terminal ``Collect``) is ``dataset.batch_transform``, a ``Compose`` you call
+on the batch.
 
 Seeds are content-addressed per event (``blake2b(name|base_seed|epoch|rank)``), so
 the same event gets the same noise across batch position / worker / resume. The
@@ -105,8 +106,8 @@ class BatchTransformMixin:
     """Mixin for a LightningModule: run the post-collate transforms in
     ``on_after_batch_transfer``.
 
-    Set ``self.batch_stages`` to a ``Compose`` (e.g. from
-    :func:`build_sensor_gpu_stages`). Lightning calls this with the batch on-device;
+    Set ``self.batch_stages`` to a ``Compose`` (e.g. the dataset's
+    ``batch_transform``). Lightning calls this with the batch on-device;
     we stamp ``_epoch``/``_rank`` so the self-seeding noise is per-epoch/rank, then
     run the transforms. (For a custom loop, just call your ``Compose`` on the batch.)
     """
