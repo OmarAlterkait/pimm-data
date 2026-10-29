@@ -47,7 +47,6 @@ from .builder import DATASETS
 from ._dataset_base import ShardEventDataset
 from ._label_decorate import gather_with_fill
 from . import _resolve
-from .transform import ResolveLabels
 from .readers.jaxtpc_step import JAXTPCStepReader
 from .readers.jaxtpc_sensor import JAXTPCSensorReader
 from .readers.jaxtpc_labl import JAXTPCLablReader
@@ -352,16 +351,6 @@ class JAXTPCDataset(ShardEventDataset):
             transform=transform, ignore_index=ignore_index, loop=loop,
         )
 
-        # A ResolveLabels in the per-event pipeline takes over label
-        # resolution (after the point subsample, on the kept points only); it
-        # inherits this dataset's label_key / momentum unless it sets its own.
-        lazy = [t for t in self.transform.transforms
-                if isinstance(t, ResolveLabels)]
-        self._lazy_labels = bool(lazy)
-        for t in lazy:
-            t.label_key = t.label_key or label_key
-            t.momentum = t.momentum or momentum
-
         # Fail fast on empty data_list — otherwise get_data() crashes later
         # with an opaque ZeroDivisionError on `idx % len(self.data_list)`.
         if len(self.data_list) == 0:
@@ -420,8 +409,7 @@ class JAXTPCDataset(ShardEventDataset):
                 self.step_reader.read_event(real_idx), labl_by_volume)
 
         self._build_relations(data, supera, hits_raw)
-        # A ResolveLabels in the pipeline resolves after the subsample instead
-        if supera is not None and not self._lazy_labels:
+        if supera is not None:
             for on in ('step', 'hits'):
                 if on in data:
                     self._resolve_labels(data, on)

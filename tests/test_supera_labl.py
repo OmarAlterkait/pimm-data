@@ -323,41 +323,6 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
     assert got <= pairs
 
 
-def test_resolve_labels_after_subsample_matches_eager(built):
-    """A ResolveLabels after the subsample gives the kept points exactly the
-    labels the eager path gives them, and get_data then carries only the
-    group reference on the points."""
-    root, _, _, _, files = built
-    sample = dict(type='Apply', on=('step', 'hits'), transforms=[
-        dict(type='GridSample', grid_size=200.0, hash_type='fnv', mode='train'),
-        dict(type='RandomDropout', dropout_ratio=0.3,
-             dropout_application_ratio=1.0)])
-    kw = dict(data_root=root, files=files, labels='motif',
-              modalities=('step', 'hits'))
-    eager = JAXTPCDataset(transform=[sample], **kw)
-    lazy = JAXTPCDataset(transform=[sample, dict(type='ResolveLabels')], **kw)
-    assert lazy._lazy_labels and not eager._lazy_labels
-    raw = lazy.get_data(0)
-    for on in ('step', 'hits'):
-        assert 'group' in raw[on]
-        assert not {'segment', 'instance', 'segment_motif'} & set(raw[on])
-    np.random.seed(3)
-    a = eager[0]
-    np.random.seed(3)
-    b = lazy[0]
-    for on in ('step', 'hits'):
-        np.testing.assert_array_equal(a[on]['group'], b[on]['group'])
-        keys = [k for k in a[on] if k.startswith(('segment', 'instance'))
-                or k in ('is_primary', 'momentum', 'vertex')]
-        assert {'segment', 'instance', 'segment_motif', 'momentum'} <= set(keys)
-        for k in keys:
-            np.testing.assert_array_equal(a[on][k], b[on][k], err_msg=k)
-    # keys=() resolves only the bare pair
-    few = JAXTPCDataset(transform=[dict(type='ResolveLabels', keys=())], **kw)[0]
-    assert {k for k in few['step'] if k.startswith(('segment', 'instance'))} \
-        == {'segment', 'instance'}
-
-
 def test_refs_shift_through_collate_and_split(built):
     """('ref', part) columns batch like cross-store edges: shifted by the
     target part's running row count, and split_event undoes it."""

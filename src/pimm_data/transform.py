@@ -1387,36 +1387,6 @@ class RandomDrop(object):
             data_dict[self.key][idx] = self.value
         return data_dict
 
-@TRANSFORMS.register_module()
-class ResolveLabels(object):
-    """Per-point labels from the label tables, deferred to here.
-
-    The dataset keeps one ``group`` reference per point and the tables
-    (``group``, ``track``, ``particle``, ``interaction``) whole; a point
-    subsample slices the reference with its points. Placed after the
-    subsample (top level, not inside ``Apply``), this writes ``segment``,
-    ``instance`` and the preset ``keys`` (None = all PILArNet keys, ``()`` =
-    just those two) for the kept points only. Its presence in the pipeline
-    turns off the dataset's own eager resolution; ``label_key`` / ``momentum``
-    default to the dataset's. A no-op on an event without label tables.
-    """
-
-    def __init__(self, on=('step', 'hits'), keys=None, label_key=None,
-                 momentum=None):
-        self.on = (on,) if isinstance(on, str) else tuple(on)
-        self.keys = keys
-        self.label_key = label_key
-        self.momentum = momentum
-
-    def __call__(self, data_dict):
-        from . import _resolve
-        for on in self.on:
-            _resolve.resolve_points(
-                data_dict, on, label_key=self.label_key or 'pdg',
-                momentum=self.momentum or 'start', keys=self.keys)
-        return data_dict
-
-
 class Compose(object):
     """Chain a list of transforms.
 

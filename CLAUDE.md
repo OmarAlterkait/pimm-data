@@ -138,7 +138,7 @@ Whenever hits is loaded JAXTPC also returns a `group` part (event-wide JAXTPC
 groups), referenced by `step.group` / `hits.group` (`('ref','group')`) plus
 `step.qs` — the step <-> hits correspondence, labels or not. There is no
 `bridges` part. With a supera `labl`, labels are walks from `group`
-(docs/LABELS.md); a `ResolveLabels` transform after the subsample defers them.
+(docs/LABELS.md).
 
 ### Detector-specific quirks
 
