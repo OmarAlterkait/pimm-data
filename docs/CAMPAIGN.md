@@ -31,8 +31,9 @@ Every challenge is `Dataset(modalities=…, labels=…) → transforms → Colle
   (per-particle decomposition of `sensor`; the **instance**-bearing modality),
   `labl` (label dimension tables, requested via `labels=`).
   - The LUCiD source doc's columns map as **`inst → hits`, `seg → step`**.
-- **labels** — `labels='pdg'|'cluster'|'interaction'|'ancestor'` (JAXTPC) /
-  `labels=True` (LUCiD) attaches `segment`/`instance` to `step`/`hits`.
+- **labels** — JAXTPC: `labels=` names per-point labels (`segment_motif`,
+  `segment_pid`, `segment_pdg`, `instance_fragment|particle|interaction`, …;
+  docs/LABELS.md). LUCiD: `labels=True` attaches `segment`/`instance`.
   `RemapSegment(scheme='motif_5cls')` turns raw `pdg` into dense class indices.
 - **Collect target** — the flat-prefixed batch the model consumes
   (`step_coord`/`step_segment`, `sensor_*`, …); SSL uses `MultiCrop`.
@@ -44,14 +45,15 @@ Every challenge is `Dataset(modalities=…, labels=…) → transforms → Colle
 
 | Challenge | modalities | labels | key transforms | Collect | config | status |
 |---|---|---|---|---|---|---|
-| 3D semantic seg (5-class motif) | `('step',)` | `'pdg'` | `RemapSegment(motif_5cls)`, `GridSample`, `RandomRotate/Flip` | `step`: coord/grid_coord/segment, feat=coord+energy | **recipe** `configs/jaxtpc/semseg_5cls.py` (pimm training cfg: `…/semseg-pt-v3m2-jaxtpc-5cls.py`) | recipe ✓ |
-| 3D instance seg | `('step',)` | `'cluster'` or `'ancestor'` | `GridSample` | `step`: coord/segment/instance | — | planned (jaxtpc supervised — deferred) |
+| 3D semantic seg (5-class motif) | `('step',)` | `('segment_motif',)` | `GridSample`, `RandomRotate/Flip` | `step`: coord/grid_coord/segment_motif, feat=coord+energy | **recipe** `configs/jaxtpc/semseg_5cls.py` (pimm training cfg: `…/semseg-pt-v3m2-jaxtpc-5cls.py`) | recipe ✓ |
+| 3D panoptic (fragment / particle) | `('step',)` | `('segment_motif','instance_fragment')` / `('segment_pid','instance_particle')` | `GridSample` | `step`: coord + those keys | — | planned |
 | 3D self-supervised (SSL) | `('step',)` | — | `MultiCrop` (global/local) | `global`/`local`: coord/origin_coord/feat | `configs/jaxtpc/ssl_step.py` | recipe ✓ |
-| Interaction classification/grouping | `('step',)` | `'interaction'` | `GridSample` | `step`: coord/segment | — | planned (jaxtpc supervised — deferred) |
+| Interaction grouping | `('step',)` | `('instance_interaction',)` | `GridSample` | `step`: coord/instance_interaction | — | planned |
 | Raw-readout SSL | `('sensor',)` | — | `MultiCrop` (no geom aug — index space) | `global`/`local`: coord/feat | `configs/jaxtpc/ssl_sensor.py` | recipe ✓ |
 | Sensor dense (densify + noise on GPU) | `('sensor',)` | — | ONE transform list, split at `Collect`: worker Collects sparse COO; post-collate tail (`ToDevice`→`Densify`→`AddNoise`→`Digitize`) = `dataset.batch_transform`, run on GPU | `sensor`: wire/time/value/plane_gid → `sensor_dense {gid:(B,W,T)}` | `configs/jaxtpc/sensor_dense_gpu.py` | recipe ✓ |
-| Instance seg on hits | `('hits',)` | `'cluster'` | `GridSample` | `hits`: coord/segment/instance | — | planned (jaxtpc supervised — deferred) |
-| sensor → step charge/energy recon | `('step','sensor')` | `'pdg'` (opt) | per-modality `Apply` | `sensor` in, `step` target | — | planned (jaxtpc supervised — deferred) |
+| Panoptic on hits (2D) | `('hits',)` | as for step | `GridSample` | `hits`: coord + those keys | — | planned |
+| step <-> hits matching | `('step','hits')` | — | per-modality `Apply` | `step`/`hits`: coord/group, `step`: qs, `group` part | — | planned |
+| sensor → step inverse problem | `('step','sensor')` | optional, on step | per-modality `Apply` | `sensor` in, `step` target | — | planned |
 
 ## LUCiD (Water Cherenkov; PMT)
 

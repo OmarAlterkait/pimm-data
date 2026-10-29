@@ -1226,7 +1226,9 @@ class HardExampleCrop(object):
         attempts=5,
         fallback="none",  # random | center | none
         p=0.5,
+        segment_key="segment",  # e.g. "segment_motif" (named labels)
     ):
+        self.segment_key = segment_key
         self.point_max = point_max
         self.sample_rate = sample_rate
         self.hard_labels = tuple(hard_labels)
@@ -1249,7 +1251,7 @@ class HardExampleCrop(object):
             return data_dict
 
         coord = data_dict["coord"]
-        segment = data_dict.get("segment", None)
+        segment = data_dict.get(self.segment_key, None)
 
         if segment is not None:
             seg = segment.reshape(-1)

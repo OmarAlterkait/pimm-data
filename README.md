@@ -83,7 +83,7 @@ ds = JAXTPCDataset(
 loader = DataLoader(ds, batch_size=4, num_workers=4,
                     collate_fn=collate_fn, pin_memory=True)
 batch = next(iter(loader))
-# batch -> step_coord, step_grid_coord, step_segment, step_feat, step_offset, ...
+# batch -> step_coord, step_grid_coord, step_segment_motif, step_feat, step_offset, ...
 ```
 
 > **`transform` takes a plain list of dicts**, not a `Compose` object.
@@ -123,11 +123,12 @@ These appear as directory names (`step/`), HDF5 file tags
 
 | Column     | Meaning | Lives inside |
 |------------|---------|-------------|
-| `segment`  | Semantic segmentation class ID per point | `data['step']['segment']`, `data['hits']['segment']` |
-| `instance` | Instance segmentation ID per point | `data['step']['instance']`, `data['hits']['instance']` |
+| `segment`  | Semantic segmentation class ID per point (LUCiD) | `data['step']['segment']`, `data['hits']['segment']` |
+| `instance` | Instance segmentation ID per point (LUCiD) | `data['step']['instance']`, `data['hits']['instance']` |
+| `segment_*` / `instance_*` | Named per-point classes / ids (JAXTPC, PILArNet names) | `data['step']['segment_motif']`, `data['hits']['instance_particle']`, … |
 
-`segment` and `instance` are **not** modalities — they are per-point
-label columns attached when labels are requested.
+These are **not** modalities — they are per-point label columns attached
+when labels are requested.
 
 ### Foreign-key arrays
 
@@ -336,9 +337,14 @@ need per-vertex grouping.
 
 | Dataset | Modality | `instance` = |
 |---------|----------|-------------|
-| JAXTPC  | both     | named: `instance_fragment` / `instance_particle` (rows of `data['particle']`), `instance_interaction` |
+| JAXTPC  | both     | named: `instance_fragment` / `instance_particle` (rows of `data['particle']`), `instance_interaction` (rows of `data['interaction']`) |
 | LUCiD   | both     | `particle_idx` (FK into labl.particle) |
 
+JAXTPC instance ids are table rows: stable, shared by step and hits, and they
+index the object tables, but not compacted to `0..K-1` and with gaps (stuff and
+unowned points are -1). Collate keeps them per event (the `offset` separates
+events); give a part `roles={'instance_particle': ('label', 'inst')}` in
+`Collect(parts=...)` for ids compacted per event and unique across the batch.
 If a task needs uniform instance convention, remap in a transform.
 
 **Segment**:
@@ -388,16 +394,16 @@ dict(type='Apply', on='step', transforms=[
 
 Terminal transform. `parts={part: dict(keys=…, feat_keys=…, …)}` pulls each
 part's keys, builds `feat` (concatenated `feat_keys`), tensorizes numpy → torch,
-and flattens to **`part_key`** (`step_coord`, `step_segment`, `step_feat`) plus
+and flattens to **`part_key`** (`step_coord`, `step_segment_motif`, `step_feat`) plus
 a derived `<part>_offset` and a `_roles` map for non-default-role keys. `name` /
 `split` pass through. `offset_keys_dict=` declares extra offsets (e.g. a second
 row-space); `roles=` tags keys (`raw` / `edge` / `instance` / `label` / `event`).
 
 ```python
 dict(type='Collect', parts={
-    'step': dict(keys=('coord', 'grid_coord', 'segment'),
+    'step': dict(keys=('coord', 'grid_coord', 'segment_motif'),
                  feat_keys=('coord', 'energy'))})
-# Batch (after collate_fn): step_coord, step_grid_coord, step_segment,
+# Batch (after collate_fn): step_coord, step_grid_coord, step_segment_motif,
 #                           step_feat, step_offset, name, split, _roles
 ```
 
@@ -424,34 +430,37 @@ transform=[
 ]
 ```
 
-**Supervised segmentation (step, labels='pdg'):**
+**Semantic segmentation (step, `labels=('segment_motif',)`):**
 
 ```python
 transform=[
     dict(type='Apply', on='step', transforms=[
-        dict(type='RemapSegment', scheme='motif_5cls'),
         dict(type='NormalizeCoord', center=[0, 0, 0], scale=4000.0),
         dict(type='GridSample', grid_size=0.001, mode='train', return_grid_coord=True),
     ]),
     dict(type='Collect', parts={
-        'step': dict(keys=('coord', 'grid_coord', 'segment'),
+        'step': dict(keys=('coord', 'grid_coord', 'segment_motif'),
                      feat_keys=('coord', 'energy'))}),
 ]
 ```
 
-**Instance segmentation on hits (labels):**
+**Particle panoptic on hits (`labels=('segment_pid', 'instance_particle')`):**
 
 ```python
 transform=[
     dict(type='Apply', on='hits', transforms=[
-        dict(type='RemapSegment', scheme='motif_5cls'),
         dict(type='GridSample', grid_size=1.0, mode='train', return_grid_coord=True),
     ]),
     dict(type='Collect', parts={
-        'hits': dict(keys=('coord', 'grid_coord', 'segment', 'instance'),
+        'hits': dict(keys=('coord', 'grid_coord', 'segment_pid', 'instance_particle'),
                      feat_keys=('coord', 'energy'))}),
 ]
 ```
+
+The panoptic pairs: `segment_motif` + `instance_fragment`, `segment_pid` +
+`instance_particle`; `instance_interaction` is class-agnostic. A model that
+reads the bare `segment`/`instance` gets them with
+`dict(type='Copy', keys_dict={'segment_pid': 'segment', 'instance_particle': 'instance'})`.
 
 Ready-to-run data-loader recipes for many challenges live in `configs/`
 (see `docs/CAMPAIGN.md`).
@@ -467,7 +476,7 @@ from torch.utils.data import DataLoader
 from pimm_data import JAXTPCDataset, collate_fn
 
 ds = JAXTPCDataset(data_root="...", modalities=("step",),
-                   labels="pdg", transform=[...])
+                   labels=("segment_motif",), transform=[...])
 loader = DataLoader(ds, batch_size=4, num_workers=4,
                     collate_fn=collate_fn, pin_memory=True)
 ```

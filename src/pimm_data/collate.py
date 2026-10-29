@@ -122,16 +122,20 @@ def point_collate_fn(batch, mix_prob=0):
     )  # currently, only support input_dict, rather than input_list
     batch = collate_fn(batch)
     if random.random() < mix_prob:
-        if "instance" in batch.keys():
+        # every per-point instance id (bare ``instance`` and the named
+        # ``instance_*`` levels): the second event of a mixed pair is shifted
+        # past the first's ids so the two never share one
+        for key in [k for k in batch
+                    if k == "instance" or k.startswith("instance_")]:
             offset = batch["offset"]
             start = 0
             num_instance = 0
             for i in range(len(offset)):
                 if i % 2 == 0:
-                    num_instance = max(batch["instance"][start : offset[i]])
+                    num_instance = batch[key][start : offset[i]].max() + 1
                 if i % 2 != 0:
-                    mask = batch["instance"][start : offset[i]] != -1
-                    batch["instance"][start : offset[i]] += num_instance * mask
+                    mask = batch[key][start : offset[i]] != -1
+                    batch[key][start : offset[i]] += num_instance * mask
                 start = offset[i]
         if "offset" in batch.keys():
             batch["offset"] = torch.cat(

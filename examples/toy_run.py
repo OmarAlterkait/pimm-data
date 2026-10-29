@@ -86,9 +86,10 @@ def hr(t):
 
 
 # ── 1) point-cloud segmentation ──────────────────────────────────────────────
-def run_seg(tag, rel, fixture, part, **ov):
+def run_seg(tag, rel, fixture, part, seg_key='segment', **ov):
     b = load_batch(rel, fixture, **ov)
-    feat, seg, off = b[f'{part}_feat'].float(), b[f'{part}_segment'].long(), b[f'{part}_offset']
+    feat, off = b[f'{part}_feat'].float(), b[f'{part}_offset']
+    seg = b[f'{part}_{seg_key}'].long().reshape(-1)
     ncls = _ncls(seg)
     model = ToyPointSeg(feat.shape[1], ncls)
     logits = model(feat)
@@ -138,7 +139,8 @@ def main():
                                 n_events=3, n_files=1, n_channels=8, schema='east_west')
 
     hr("Segmentation (per-point classifier)")
-    run_seg("JAXTPC semseg", 'jaxtpc/semseg_5cls.py', jr, 'step', min_deposits=0)
+    run_seg("JAXTPC semseg", 'jaxtpc/semseg_5cls.py', jr, 'step',
+            seg_key='segment_motif', min_deposits=0)
     run_seg("LUCiD seg_step", 'lucid/seg_step.py', lr, 'step')
     run_seg("LUCiD perpmt_seg_hits", 'lucid/perpmt_seg_hits.py', lr, 'hits')
 

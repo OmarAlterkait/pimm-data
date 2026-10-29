@@ -98,3 +98,54 @@ def test_pid_is_constant_on_particles_motif_on_fragments(jaxtpc_data_root):
         c, i = s[cls][:, 0], s[inst][:, 0]
         for r in np.unique(i[i >= 0]):
             assert len(np.unique(c[i == r])) == 1, (cls, inst, r)
+
+
+def test_mix_collate_keeps_named_instances_apart(jaxtpc_data_root):
+    """point_collate_fn's mix merges event pairs; every instance_* level of
+    the second event moves past the first's ids, -1 stays -1."""
+    import random
+    import torch
+    from pimm_data.collate import point_collate_fn
+    lab = ('instance_fragment', 'instance_particle')
+    ds = make_ds(jaxtpc_data_root, ('step',), labels=lab, transform=[
+        dict(type='Collect', part='step', keys=('coord',) + lab,
+             feat_keys=('coord',))])
+    a, b = ds[0], ds[1]
+    random.seed(0)
+    m = point_collate_fn([a, b], mix_prob=1.0)
+    n = len(a['coord'])
+    for k in lab:
+        first, second = m[k][:n], m[k][n:]
+        assert torch.equal(first, a[k]) and torch.equal(second < 0, b[k] < 0)
+        assert not set(first[first >= 0].tolist()) & \
+            set(second[second >= 0].tolist())
+
+
+def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):
+    from pimm_data.transform import TRANSFORMS
+    s = make_ds(jaxtpc_data_root, ('step',),
+                labels='segment_motif').get_data(0)['step']
+    crop = TRANSFORMS.build(dict(type='HardExampleCrop', point_max=20,
+                                 hard_labels=(3,), p=1.0,
+                                 segment_key='segment_motif'))
+    out = crop(dict(s))
+    assert len(out['coord']) == 20 and (out['segment_motif'] == 3).any()
+
+
+def test_label_role_compacts_instance_rows(jaxtpc_data_root):
+    """Instance ids are particle rows (gaps, per event); a ('label', grp) role
+    in Collect compacts them per event and makes them unique in the batch."""
+    import torch
+    from pimm_data import collate_fn
+    ds = make_ds(jaxtpc_data_root, ('step',), labels='instance_particle',
+                 transform=[dict(type='Collect', parts={'step': dict(
+                     keys=('coord', 'instance_particle'),
+                     roles={'instance_particle': ('label', 'p')},
+                     feat_keys=('coord',))})])
+    b = collate_fn([ds[0], ds[1]])
+    ids = b['step_instance_particle'].reshape(-1)
+    n0 = int(b['step_offset'][0])
+    k0 = len(torch.unique(ids[:n0][ids[:n0] >= 0]))
+    assert set(ids[:n0][ids[:n0] >= 0].tolist()) == set(range(k0))
+    rest = ids[n0:][ids[n0:] >= 0]
+    assert rest.min() == k0           # the second event follows the first

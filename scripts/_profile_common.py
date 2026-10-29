@@ -16,7 +16,7 @@ What differs between the two datasets:
   not, so JAXTPC defaults to ``(step, sensor, hits)``.
 * **stream schema** — the minimal "tensorize one stream" transform pulls
   different keys (LUCiD ``hits`` carries a bare ``time``; JAXTPC folds
-  time into the 2-D wire ``coord`` and adds ``instance``).
+  time into the 2-D wire ``coord`` and adds ``group``).
 * **raw per-event read** — LUCiD events are flat column datasets; JAXTPC
   events are nested ``volume_N[/plane]`` groups, so the raw-I/O baseline
   reads every dataset under the event group instead of a fixed list.
@@ -75,11 +75,11 @@ def default_transform(dataset):
     """
     if dataset == 'jaxtpc':
         # JAXTPC wire hits: coord is (wire, time); time is not a separate
-        # key, and each entry carries a group instance id.
-        return [dict(type='Collect', stream='hits',
-                     keys=['coord', 'energy', 'instance'],
+        # key, and each entry carries its group (a reference into 'group').
+        return [dict(type='Collect', part='hits',
+                     keys=['coord', 'energy', 'group'],
                      feat_keys=['energy'])]
-    return [dict(type='Collect', stream='hits',
+    return [dict(type='Collect', part='hits',
                  keys=['coord', 'energy', 'time'],
                  feat_keys=['energy', 'time'])]
 
