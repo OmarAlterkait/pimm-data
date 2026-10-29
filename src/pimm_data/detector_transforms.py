@@ -6,10 +6,10 @@ in step data when no labl file is available (fallback path).
 
 ``RemapSegment``: maps the values in ``data_dict['segment']`` through a
 user-provided ``{old_value: new_value}`` dict, with a default for
-unmapped values. Typical use: after loading with ``label_key='pdg'``
+unmapped values. Typical use: after loading with ``labels='pdg'``
 (so ``segment`` holds raw PDG codes), remap to a task-specific set of
 class indices before loss. Works for any int-valued segment column
-(pdg, interaction, cluster) — not PDG-specific.
+— not PDG-specific. (``labels='motif'`` / ``'pid'`` need no remap.)
 
 ``Densify`` / ``AddNoise`` / ``Digitize``: the dense sensor-modality chain. The
 full forward path mirrors production ``make_noisy``::
@@ -350,10 +350,9 @@ class PDGToSemantic:
 class RemapSegment:
     """Remap integer values in a segment-like field through a lookup dict.
 
-    Motivating case: production labl files store raw PDG codes in the
-    ``pdg`` column. A downstream task wants 5-class indices. Configure
-    ``JAXTPCDataset`` with ``label_key='pdg'`` (so ``segment`` contains
-    raw PDG codes per deposit), then add::
+    Motivating case: a class set built from PDG codes. Configure
+    ``JAXTPCDataset`` with ``labels='pdg'`` (so ``segment`` contains the
+    instance's raw PDG code per deposit), then add::
 
         dict(type="RemapSegment", scheme="motif_5cls")
 

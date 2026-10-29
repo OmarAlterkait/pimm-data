@@ -1,5 +1,5 @@
 """
-Synthetic v3 fixture generators for JAXTPC and LUCiD.
+Synthetic fixture generators for JAXTPC (format 2) and LUCiD (v3).
 
 The readers in :mod:`pimm_data.readers` expect a specific on-disk HDF5
 layout (four modalities per dataset: ``step/``, ``sensor/``, ``hits/``,
@@ -15,10 +15,10 @@ satisfy every cross-modality invariant the readers and dataset layer
 rely on:
 
 * **JAXTPC.** ``hits.deposit_to_group`` indexes into
-  ``hits.group_to_track``; ``labl.deposit_to_track[i] ==
-  hits.group_to_track[hits.deposit_to_group[i]]``; every per-deposit
-  track id appears in ``labl.track_ids``; per-plane CSR entries
-  decode to the declared ``n_pixels``.
+  ``hits.group_to_track``; per-plane CSR entries decode to the declared
+  ``n_pixels``; ``labl`` is :func:`pimm_data.supera_labl.write_labl` run
+  on a pysupera file drawn against the hits (:func:`make_supera`), so it
+  pairs with the hits entry for entry, as in production.
 * **LUCiD.** Every ``step.track_idx`` appears in
   ``labl.per_track.track_id``; every ``hits.particle_idx`` and
   ``labl.per_track.particle_idx`` is a valid index into the per-
@@ -123,7 +123,7 @@ def _stamp_source_event_idx(outdir, dataset_name, modalities, n_files,
 # ---------------------------------------------------------------------------
 
 _JAXTPC_PLANES = ('U', 'V', 'Y')
-_JAXTPC_PDG_POOL = np.array([13, 11, 211, 22, 2212], dtype=np.int32)
+EVENT_ID_BASE = 1000      # event ids deliberately unlike positions
 _JAXTPC_POS_STEP_MM = 0.05
 _JAXTPC_POS_ORIGIN = (-2160.0, -2160.0, -2160.0)
 
@@ -131,17 +131,24 @@ _JAXTPC_POS_ORIGIN = (-2160.0, -2160.0, -2160.0)
 def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
                        n_volumes=2, n_deposits=60, n_groups=6, n_tracks=6,
                        n_pixels_per_plane=40, readout_type='wire', seed=0,
-                       stamp_source_event_idx=True):
-    """Write a minimal schema-conformant JAXTPC v3 dataset.
+                       event_id_base=EVENT_ID_BASE):
+    """Write a minimal JAXTPC format-2 dataset with its ``labl``.
 
-    Creates ``{outdir}/{step,sensor,hits,labl}/{dataset_name}_{mod}_NNNN.h5``.
+    Creates ``{outdir}/{step,sensor,hits,labl}/{dataset_name}_{mod}_NNNN.h5``
+    (and the pysupera file the ``labl`` was made from, under ``supera/``).
+    Events are ``entry_NNNNNN`` groups; event ``n`` of file ``i`` has the
+    campaign-unique ``event_id`` ``event_id_base + i * n_events + n``, stored
+    in ``/dprod/events`` and on the entry. ``labl`` is
+    :func:`pimm_data.supera_labl.write_labl` run on a synthetic pysupera file
+    (:func:`make_supera`), as in production.
 
     ``readout_type`` is ``'wire'`` (three U/V/Y planes per volume) or
     ``'pixel'`` (single ``Pixel`` plane per volume; coord adds a pz axis).
     """
+    from .supera_labl import write_labl
     assert readout_type in ('wire', 'pixel'), readout_type
     os.makedirs(outdir, exist_ok=True)
-    for mod in ('step', 'sensor', 'hits', 'labl'):
+    for mod in ('step', 'sensor', 'hits', 'labl', 'supera'):
         os.makedirs(os.path.join(outdir, mod), exist_ok=True)
 
     rng = np.random.default_rng(seed)
@@ -152,24 +159,16 @@ def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
                                 n_tracks, n_pixels_per_plane, readout_type)
             for _ in range(n_events)
         ]
-        tag = f'{dataset_name}_{{mod}}_{file_idx:04d}.h5'
-        _write_jaxtpc_step(os.path.join(outdir, 'step',
-                                        tag.format(mod='step')), events)
-        _write_jaxtpc_sensor(os.path.join(outdir, 'sensor',
-                                          tag.format(mod='sensor')), events,
-                             readout_type)
-        _write_jaxtpc_hits(os.path.join(outdir, 'hits',
-                                        tag.format(mod='hits')), events,
-                           readout_type)
-        _write_jaxtpc_labl(os.path.join(outdir, 'labl',
-                                        tag.format(mod='labl')), events)
+        ids = event_id_base + file_idx * n_events + np.arange(n_events)
+        path = lambda mod: os.path.join(
+            outdir, mod, f'{dataset_name}_{mod}_{file_idx:04d}.h5')
+        _write_jaxtpc_step(path('step'), events, ids)
+        _write_jaxtpc_sensor(path('sensor'), events, ids, readout_type)
+        _write_jaxtpc_hits(path('hits'), events, ids, readout_type)
+        make_supera(path('hits'), path('supera'), seed=seed + file_idx)
+        write_labl(path('supera'), path('hits'), path('labl'))
 
     _stamp_step_geometry(outdir, dataset_name, n_files, n_volumes, readout_type)
-
-    if stamp_source_event_idx:
-        _stamp_source_event_idx(outdir, dataset_name,
-                                ('step', 'sensor', 'hits', 'labl'),
-                                n_files, n_events)
     return outdir
 
 
@@ -182,11 +181,6 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
         track_ids = np.sort(rng.choice(
             np.arange(1, 10 * n_tracks + 1), size=n_tracks,
             replace=False)).astype(np.int32)
-        # Deterministic cycle guarantees every PDG in the pool appears when
-        # n_tracks >= len(pool); downstream tests rely on PDG variety and
-        # on at least one value > 20 to distinguish raw from remapped.
-        track_pdg = _JAXTPC_PDG_POOL[
-            np.arange(n_tracks) % len(_JAXTPC_PDG_POOL)].astype(np.int32)
         # Each group belongs to exactly one track
         group_to_track = track_ids[rng.integers(0, n_tracks, size=n_groups)
                                    ].astype(np.int32)
@@ -194,7 +188,6 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
         # Each deposit belongs to exactly one group
         deposit_to_group = rng.integers(0, n_groups, size=n_deposits).astype(
             np.int32)
-        deposit_to_track = group_to_track[deposit_to_group].astype(np.int32)
 
         # Deposit geometry — uint16 positions scaled by pos_step_mm
         # Keep positions well inside uint16 range and the detector fiducial.
@@ -221,10 +214,7 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
             t0_us=t0_us, charge=charge, photons=photons,
             qs_fractions=qs_fractions,
             deposit_to_group=deposit_to_group,
-            deposit_to_track=deposit_to_track,
             group_to_track=group_to_track,
-            track_ids=track_ids,
-            track_pdg=track_pdg,
             planes=planes,
         ))
     return volumes
@@ -320,14 +310,29 @@ def _build_jaxtpc_plane(rng, n_groups, n_pixels_per_plane, readout_type='wire'):
     return out
 
 
-def _write_jaxtpc_step(path, events):
+def _format2(f, ids):
+    """Format-2 ``config``, ``/dprod/events`` and one ``entry_NNNNNN`` group
+    per event id. Returns ``(config, entries)``."""
+    cfg = f.create_group('config')
+    cfg.attrs['format_version'] = 2
+    cfg.attrs['n_events'] = len(ids)
+    ev = f.create_group('dprod/events')
+    ev.attrs['order'] = 'sorted'
+    ev.create_dataset('event_id', data=np.asarray(ids, np.int64))
+    entries = []
+    for i, eid in enumerate(ids):
+        g = f.create_group(f'entry_{i:06d}')
+        g.attrs['event_id'] = int(eid)
+        entries.append(g)
+    return cfg, entries
+
+
+def _write_jaxtpc_step(path, events, ids):
     with h5py.File(path, 'w') as f:
-        cfg = f.create_group('config')
-        cfg.attrs['n_events'] = len(events)
+        cfg, entries = _format2(f, ids)
         cfg.attrs['n_volumes'] = len(events[0])
         cfg.attrs['pos_step_mm'] = _JAXTPC_POS_STEP_MM
-        for i, volumes in enumerate(events):
-            evt = f.create_group(f'event_{i:03d}')
+        for evt, volumes in zip(entries, events):
             for v in volumes:
                 vg = evt.create_group(f'volume_{v["vol_idx"]}')
                 vg.attrs['n_actual'] = int(v['positions'].shape[0])
@@ -341,10 +346,9 @@ def _write_jaxtpc_step(path, events):
                     vg.create_dataset(k, data=v[k])
 
 
-def _write_jaxtpc_sensor(path, events, readout_type='wire'):
+def _write_jaxtpc_sensor(path, events, ids, readout_type='wire'):
     with h5py.File(path, 'w') as f:
-        cfg = f.create_group('config')
-        cfg.attrs['n_events'] = len(events)
+        cfg, entries = _format2(f, ids)
         cfg.attrs['readout_type'] = readout_type
         # One fixed tick count per file, covering every plane's max time —
         # mirrors production (sensor files carry num_time_steps) and lets a
@@ -362,8 +366,7 @@ def _write_jaxtpc_sensor(path, events, readout_type='wire'):
                     for pn, plane in v['planes'].items():
                         nwires_by_type[pn] = max(nwires_by_type.get(pn, 0),
                                                  int(plane['n_wires']))
-        for i, volumes in enumerate(events):
-            evt = f.create_group(f'event_{i:03d}')
+        for evt, volumes in zip(entries, events):
             for v in volumes:
                 vg = evt.create_group(f'volume_{v["vol_idx"]}')
                 for plane_name, plane in v['planes'].items():
@@ -387,7 +390,7 @@ def _write_jaxtpc_sensor(path, events, readout_type='wire'):
                                           data=plane['delta_wire'])
 
 
-def _write_jaxtpc_hits(path, events, readout_type='wire'):
+def _write_jaxtpc_hits(path, events, ids, readout_type='wire'):
     shared_keys = ('group_ids', 'group_sizes', 'center_times',
                    'peak_charges', 'delta_times')
     readout_keys = (
@@ -395,11 +398,9 @@ def _write_jaxtpc_hits(path, events, readout_type='wire'):
         if readout_type == 'pixel'
         else ('center_wires', 'delta_wires', 'charges_u16'))
     with h5py.File(path, 'w') as f:
-        cfg = f.create_group('config')
-        cfg.attrs['n_events'] = len(events)
+        cfg, entries = _format2(f, ids)
         cfg.attrs['readout_type'] = readout_type
-        for i, volumes in enumerate(events):
-            evt = f.create_group(f'event_{i:03d}')
+        for evt, volumes in zip(entries, events):
             for v in volumes:
                 vg = evt.create_group(f'volume_{v["vol_idx"]}')
                 vg.create_dataset('group_to_track', data=v['group_to_track'])
@@ -412,27 +413,113 @@ def _write_jaxtpc_hits(path, events, readout_type='wire'):
                         pg.create_dataset(key, data=plane[key])
 
 
-def _write_jaxtpc_labl(path, events):
-    with h5py.File(path, 'w') as f:
-        cfg = f.create_group('config')
-        cfg.attrs['n_events'] = len(events)
-        cfg.attrs['n_volumes'] = len(events[0])
-        for i, volumes in enumerate(events):
-            evt = f.create_group(f'event_{i:03d}')
-            for v in volumes:
-                vg = evt.create_group(f'volume_{v["vol_idx"]}')
-                vg.create_dataset('track_ids', data=v['track_ids'])
-                vg.create_dataset('track_pdg', data=v['track_pdg'])
-                # cluster and interaction need >1 unique value for
-                # test_different_label_keys; derive from track position.
-                cluster = np.arange(1, 1 + len(v['track_ids']), dtype=np.int32)
-                interaction = (np.arange(len(v['track_ids']),
-                                         dtype=np.int32) % 3) + 1
-                vg.create_dataset('track_cluster', data=cluster)
-                vg.create_dataset('track_interaction', data=interaction)
-                vg.create_dataset('track_ancestor', data=v['track_ids'])
-                vg.create_dataset('deposit_to_track',
-                                  data=v['deposit_to_track'])
+#: (pdg, sem_type) of the fragment rows of every synthetic pysupera event;
+#: rows 0..2 head instances, fragments 3, 4 belong to instance 0 and 5 to 1.
+SUPERA_FRAGMENTS = ((13, 2), (22, 1), (2212, 5), (11, 3), (11, 4), (321, 2))
+_SUPERA_INSTANCE_OF = (0, 1, 2, 0, 0, 1)
+
+
+def make_supera(hits_path, out_path, seed=0):
+    """A pysupera-4.1-shaped file for every entry of the hits file.
+
+    Per event: the six :data:`SUPERA_FRAGMENTS` (rows 0-5) plus one merged
+    delta-ray row (6). Interactions: two; instance 2 is in interaction 1, the
+    rest in 0. Ids are random, never row positions (pysupera's are not
+    either). Each group's owner is a function of its track; about 10% of
+    groups and every volume's group 0 stay unowned, and two groups per volume
+    are owned by a different fragment than their track (pysupera's split
+    tracks)."""
+    rng = np.random.default_rng(seed)
+    cols = {k: [] for k in (
+        'id', 'frag_id', 'inst_id', 'frag_inst_id', 'frag_parent_id',
+        'inst_parent_id', 'parent_id', 'ancestor_id', 'interaction_id',
+        'pdg', 'sem_type', 'frag_sem_type', 'inst_sem_type',
+        'interaction_type', 'geant4_trackid', 'geant4_parent_trackid',
+        'geant4_parent_pdg', 'mass')}
+    kin = {k: [] for k in ('start_pos', 'start_mom', 'first_pos', 'first_mom',
+                           'last_pos', 'last_mom', 'end_pos', 'end_mom')}
+    inter = {k: [] for k in ('x', 'y', 'z', 'time', 'vertex_id',
+                             'energy_sum', 'ke_sum')}
+    p_off, g_off, v_off, v_idx, i_off, frag_ids = [0], [0], [], [0], [0], []
+    with h5py.File(hits_path, 'r') as hi:
+        readout = str(hi['config'].attrs.get('readout_type', 'wire'))
+        entries = sorted(k for k in hi if k.startswith('entry_'))
+        event_ids = [int(hi[k].attrs['event_id']) for k in entries]
+        for k in entries:
+            ids = rng.permutation(1000)[:7] + 50
+            for r in range(7):
+                fr = r < 6
+                pdg, sem = SUPERA_FRAGMENTS[r] if fr else (11, 3)
+                inst = _SUPERA_INSTANCE_OF[r] if fr else 0
+                cols['id'].append(ids[r])
+                cols['frag_id'].append(ids[r] if fr else -1)
+                cols['inst_id'].append(ids[r] if r < 3 else -1)
+                cols['frag_inst_id'].append(ids[inst] if fr else -1)
+                cols['frag_parent_id'].append(ids[r])
+                cols['inst_parent_id'].append(ids[r] if r < 3 else -1)
+                cols['parent_id'].append(ids[r] if r in (0, 1) else ids[0])
+                cols['ancestor_id'].append(ids[0] if r != 1 else ids[1])
+                cols['interaction_id'].append(1 if inst == 2 else 0)
+                cols['pdg'].append(pdg)
+                cols['sem_type'].append(sem)
+                cols['frag_sem_type'].append(sem if fr else -1)
+                cols['inst_sem_type'].append(SUPERA_FRAGMENTS[inst][1])
+                cols['interaction_type'].append(r)
+                cols['geant4_trackid'].append(r + 1)
+                cols['geant4_parent_trackid'].append(-1 if r < 2 else 1)
+                cols['geant4_parent_pdg'].append(-1 if r < 2 else 13)
+                cols['mass'].append(105.66)
+            for c in kin:
+                kin[c].append(rng.normal(size=(7, 4)) * 100)
+            p_off.append(p_off[-1] + 7)
+            for c, v in zip(inter, rng.normal(size=(7, 2)) * 100):
+                inter[c].extend(v)
+            i_off.append(i_off[-1] + 2)
+            vks = sorted(x for x in hi[k] if x.startswith('volume_'))
+            tracks = np.unique(np.concatenate(
+                [hi[k][vk]['group_to_track'][:] for vk in vks]))
+            owner = dict(zip(tracks.tolist(),
+                             rng.integers(-1, 6, size=len(tracks)).tolist()))
+            base = 0
+            for vk in vks:
+                g2t = hi[k][vk]['group_to_track'][:]
+                own = np.array([owner[int(t)] for t in g2t])
+                own[rng.random(len(g2t)) < 0.1] = -1
+                split = np.flatnonzero(own >= 0)[:2]
+                own[split] = (own[split] + 1) % 6
+                own[0] = -1
+                frag_ids.extend(np.where(own >= 0, ids[np.maximum(own, 0)], -1))
+                v_off.append(base)
+                base += len(g2t)
+            g_off.append(g_off[-1] + base)
+            v_idx.append(len(v_off))
+    with h5py.File(out_path, 'w') as f:
+        f['format_version'] = '4.1.0'
+        f['n_events'] = len(entries)
+        f.attrs['readout_type'] = readout
+        ev = f.create_group('events')
+        ev['offsets'] = np.array(p_off, np.int64)
+        ev['jaxtpc_entry'] = np.array([int(k[6:]) for k in entries], np.int64)
+        ev['event_id'] = np.array(event_ids, np.int64)
+        ev['job_id'] = np.zeros(len(entries), np.int64)
+        ev['job_event'] = np.arange(len(entries), dtype=np.int64)
+        g = f.create_group('groups')
+        g['fragment_id'] = np.array(frag_ids, np.int32)
+        g['is_le'] = np.zeros(len(frag_ids), np.int8)
+        g['offsets'] = np.array(g_off, np.int64)
+        g['volume_offsets'] = np.array(v_off, np.int64)
+        g['volume_offsets_index'] = np.array(v_idx, np.int64)
+        p = f.create_group('particles')
+        for c, v in cols.items():
+            p[c] = np.array(v, np.float64 if c == 'mass' else np.int32)
+        for c, v in kin.items():
+            p[c] = np.concatenate(v)
+        i = f.create_group('inter')
+        for c, v in inter.items():
+            i[c] = np.array(v, np.float32)
+        i['offsets'] = np.array(i_off, np.int64)
+        i['reaction'] = np.array([b''] * len(inter['x']), dtype=object)
+    return out_path
 
 
 # ---------------------------------------------------------------------------

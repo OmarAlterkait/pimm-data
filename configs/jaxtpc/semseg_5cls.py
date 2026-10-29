@@ -1,6 +1,9 @@
 """Data-loader recipe — JAXTPC 3D semantic segmentation (motif 5-class).
 
-CAMPAIGN.md row: JAXTPC | 3D semantic seg | modalities=('step',), labels='pdg'.
+CAMPAIGN.md row: JAXTPC | 3D semantic seg | modalities=('step',), labels='motif'.
+
+``labels='motif'`` is pysupera's fragment class (shower, track, michel,
+delta, le) — already the 5 dense classes, so no RemapSegment.
 
 This file is the **data-loading half** (new flat-prefixed API: Apply(on=) +
 Collect(parts=)). The model/optimizer/hooks half is a placeholder to fill
@@ -21,7 +24,6 @@ grid_size = 0.001
 _geom = [
     dict(type="NormalizeCoord", center=_center, scale=_scale),
     dict(type="LogTransform", min_val=0.01, max_val=20.0),
-    dict(type="RemapSegment", scheme="motif_5cls"),   # raw pdg -> 5 dense classes
     dict(type="GridSample", grid_size=grid_size, hash_type="fnv",
          mode="train", return_grid_coord=True),
 ]
@@ -41,12 +43,12 @@ test_transform = [dict(type="Apply", on="step", transforms=_geom), _collect]
 data = dict(
     num_classes=5,
     ignore_index=-1,
-    names=["shower", "track", "michel", "delta", "led"],
+    names=["shower", "track", "michel", "delta", "le"],
     train=dict(type="JAXTPCDataset", data_root=_data_root, split="train",
-               dataset_name="sim", modalities=("step",), labels="pdg",
+               dataset_name="sim", modalities=("step",), labels="motif",
                transform=train_transform, min_deposits=1024, max_len=-1),
     val=dict(type="JAXTPCDataset", data_root=_data_root, split="val",
-             dataset_name="sim", modalities=("step",), labels="pdg",
+             dataset_name="sim", modalities=("step",), labels="motif",
              transform=test_transform, min_deposits=1024, max_len=1000),
 )
 

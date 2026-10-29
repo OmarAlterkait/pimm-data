@@ -17,29 +17,6 @@ def _jds(root, modalities, **kw):
                          modalities=modalities, min_deposits=0, max_len=2, **kw)
 
 
-def test_labels_param_matches_legacy_labl_modality(jaxtpc_data_root):
-    """modalities=('step',), labels='pdg' decorates identically to the legacy
-    modalities=('step','labl'), label_key='pdg' — labl is now a label source."""
-    new = _jds(jaxtpc_data_root, ('step',), labels='pdg').get_data(0)['step']
-    old = _jds(jaxtpc_data_root, ('step', 'labl'), label_key='pdg').get_data(0)['step']
-    assert _seg_fp(new['segment']) == _seg_fp(old['segment'])
-    assert _seg_fp(new['instance']) == _seg_fp(old['instance'])
-
-
-def test_labels_requires_decoratable_modality(jaxtpc_data_root):
-    import pytest
-    with pytest.raises(ValueError, match="decoratable"):
-        _jds(jaxtpc_data_root, ('sensor',), labels='pdg')
-
-
-def test_labels_warns_on_undecorated_modality(jaxtpc_data_root):
-    """labels= + a non-decoratable modality (sensor) is legal but WARNS — the
-    silent 'sensor isn't labelled' coupling made loud."""
-    import pytest
-    with pytest.warns(UserWarning, match="not label-decoratable"):
-        _jds(jaxtpc_data_root, ('step', 'sensor'), labels='pdg')
-
-
 def test_labels_no_warn_when_all_decoratable(jaxtpc_data_root):
     """No warning when every requested modality is decoratable (step/hits)."""
     import warnings as _w

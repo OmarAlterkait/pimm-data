@@ -1,8 +1,8 @@
 # The `labl` file: what to extract from pysupera
 
 Status: implemented on branch `doraemon-labels` (2026-10-27). Writer:
-`pimm_data/supera_labl.py`. Reader: `JAXTPCLablReader` (`kind == 'supera'`).
-Labels: `pimm_data/_supera_labels.py`. Measured on
+`pimm_data/supera_labl.py`. Reader: `JAXTPCLablReader`. Labels:
+`pimm_data/_resolve.py`, through `JAXTPCDataset(labels=...)`. Measured on
 `doraemon_2026_1M_lartpc` (JAXTPC f0d2ed3, pysupera dab92d8 / format 4.1.0), task 0,
 wire and pixel.
 
@@ -11,7 +11,7 @@ wire and pixel.
 - **The sensor carries no labels.** It is the summed, thresholded readout; it does
   not record which particle produced which charge, so there is no key in it to join a
   label to. Labels reach the readout only through `hits`, which is the sensor split
-  by group. `('sensor', 'labl')` stays rejected.
+  by group. `labels=` with only `sensor` is rejected.
 - **The JAXTPC group is the unit of truth.** Both released point clouds reach labels
   through it:
   - step deposit → `deposit_to_group` → group
@@ -37,7 +37,7 @@ partitions wire on deposits and pixel on hits. So there is one `labl` per readou
 
 The group is the correspondence key that step and hits share. It is not a
 label, so pimm-data exposes it (`step.group`, `hits.group` → a `group` part)
-whenever hits is loaded, with or without `labl`. Every truth above the group
+whenever hits is loaded or `labels=` is set. Every truth above the group
 (track id, fragment, instance, PDG, kinematics, interaction) is in `labl` and
 nowhere else.
 
@@ -103,6 +103,14 @@ particle: labl columns            fragment/instance/fragment_instance/parent/
                                   ancestor/... -> particle, interaction -> interaction
 interaction: labl columns
 ```
+
+`JAXTPCDataset(labels=...)` reads `labl` and writes two keys on each step / hits
+point: `segment` (`'motif'`, `'pid'`, `'pdg'`, `'particle'` or `'interaction'`)
+and `instance` (the particle row). Any other key from `_resolve.PRESETS` is
+opt-in through `label_keys=`, because each one is a lookup over every point: on a
+1M wire event, all eight cost 0.98 s of `get_data`, the two defaults 0.26 s.
+Object-level targets (momentum, vertex, primary) are better read from the
+`particle` / `interaction` tables through `group` than broadcast to points.
 
 Labels are walks along these references (`_resolve.follow`). The PILArNet keys
 are one preset (`_resolve.PRESETS['pilarnet']`). Class vocabularies are derived

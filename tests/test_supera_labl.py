@@ -15,119 +15,13 @@ import pytest
 from pimm_data import JAXTPCDataset
 from pimm_data._shard_meta import clear_cache
 from pimm_data.supera_labl import write_labl
-from pimm_data.testing import make_jaxtpc_sample
+from pimm_data.testing import SUPERA_FRAGMENTS, make_jaxtpc_sample
 
-from _format2_helpers import ID_BASE, N_EVENTS, _to_format2
+from _format2_helpers import ID_BASE, N_EVENTS, _to_tasks
 
 TASK = 'jaxtpc_wire_j000000-000004'
-# (pdg, sem_type) of fragment rows; rows 0..2 head instances
-FRAGMENTS = [(13, 2), (22, 1), (2212, 5), (11, 3), (11, 4), (321, 2)]
+FRAGMENTS = SUPERA_FRAGMENTS
 EXPECT_MOTIF = {2: 1, 1: 0, 5: 4, 3: 3, 4: 2}
-
-
-def _make_supera(hits_path, out_path, seed=0):
-    """One pysupera-4.1-shaped file for every entry of ``hits_path``.
-
-    Per event: the six FRAGMENTS (rows 0-5) plus one merged delta-ray row (6).
-    Rows 0, 1, 2 head instances; fragments 3, 4 belong to instance 0 and 5 to
-    instance 1. Interactions: rows 0 and 1; instance 2 is in interaction 1.
-    Groups are owned at random (some unowned)."""
-    rng = np.random.default_rng(seed)
-    cols = {k: [] for k in (
-        'id', 'frag_id', 'inst_id', 'frag_inst_id', 'frag_parent_id',
-        'inst_parent_id', 'parent_id', 'ancestor_id', 'interaction_id',
-        'pdg', 'sem_type', 'frag_sem_type', 'inst_sem_type',
-        'interaction_type', 'geant4_trackid', 'geant4_parent_trackid',
-        'geant4_parent_pdg', 'mass')}
-    kin = {k: [] for k in ('start_pos', 'start_mom', 'first_pos', 'first_mom',
-                           'last_pos', 'last_mom', 'end_pos', 'end_mom')}
-    p_off, g_off, v_off, v_idx, i_off = [0], [0], [], [0], [0]
-    frag_ids, inter = [], {k: [] for k in ('x', 'y', 'z', 'time', 'vertex_id',
-                                           'energy_sum', 'ke_sum')}
-    with h5py.File(hits_path, 'r') as hi:
-        entries = sorted(k for k in hi if k.startswith('entry_'))
-        event_ids = [int(hi[k].attrs['event_id']) for k in entries]
-        for k in entries:
-            ids = rng.permutation(1000)[:7] + 50          # never row positions
-            inst_of_frag = [0, 1, 2, 0, 0, 1]
-            for r in range(7):
-                fr = r < 6
-                pdg, sem = FRAGMENTS[r] if fr else (11, 3)
-                inst = inst_of_frag[r] if fr else 0
-                cols['id'].append(ids[r])
-                cols['frag_id'].append(ids[r] if fr else -1)
-                cols['inst_id'].append(ids[r] if r < 3 else -1)
-                cols['frag_inst_id'].append(ids[inst] if fr else -1)
-                cols['frag_parent_id'].append(ids[r])
-                cols['inst_parent_id'].append(ids[r] if r < 3 else -1)
-                cols['parent_id'].append(ids[r] if r in (0, 1) else ids[0])
-                cols['ancestor_id'].append(ids[0] if r != 1 else ids[1])
-                cols['interaction_id'].append(1 if inst == 2 else 0)
-                cols['pdg'].append(pdg)
-                cols['sem_type'].append(sem)
-                cols['frag_sem_type'].append(sem if fr else -1)
-                cols['inst_sem_type'].append(FRAGMENTS[inst][1])
-                cols['interaction_type'].append(r)
-                cols['geant4_trackid'].append(r + 1)
-                cols['geant4_parent_trackid'].append(-1 if r < 2 else 1)
-                cols['geant4_parent_pdg'].append(-1 if r < 2 else 13)
-                cols['mass'].append(105.66)
-            for c in kin:
-                kin[c].append(rng.normal(size=(7, 4)) * 100)
-            p_off.append(p_off[-1] + 7)
-            for c, v in zip(('x', 'y', 'z', 'time', 'vertex_id', 'energy_sum',
-                             'ke_sum'), rng.normal(size=(7, 2)) * 100):
-                inter[c].extend(v)
-            i_off.append(i_off[-1] + 2)
-            # owner is a function of the group's track (as in pysupera);
-            # some groups of an owned track stay unowned (out of window)
-            vks = sorted(x for x in hi[k] if x.startswith('volume_'))
-            tracks = np.unique(np.concatenate(
-                [hi[k][vk]['group_to_track'][:] for vk in vks]))
-            owner = dict(zip(tracks.tolist(),
-                             rng.integers(-1, 6, size=len(tracks)).tolist()))
-            base = 0
-            for vk in vks:
-                g2t = hi[k][vk]['group_to_track'][:]
-                n_g = len(g2t)
-                own = np.array([owner[int(t)] for t in g2t])
-                own[rng.random(n_g) < 0.1] = -1
-                # pysupera splits the odd track between two fragments
-                split = np.flatnonzero(own >= 0)[:2]
-                own[split] = (own[split] + 1) % 6
-                own[0] = -1
-                frag_ids.extend(np.where(own >= 0, ids[np.maximum(own, 0)], -1))
-                v_off.append(base)
-                base += n_g
-            g_off.append(g_off[-1] + base)
-            v_idx.append(len(v_off))
-    with h5py.File(out_path, 'w') as f:
-        f['format_version'] = '4.1.0'
-        f['n_events'] = len(entries)
-        f.attrs['readout_type'] = 'wire'
-        ev = f.create_group('events')
-        ev['offsets'] = np.array(p_off, np.int64)
-        ev['jaxtpc_entry'] = np.array([int(k[6:]) for k in entries], np.int64)
-        ev['event_id'] = np.array(event_ids, np.int64)
-        ev['job_id'] = np.zeros(len(entries), np.int64)
-        ev['job_event'] = np.arange(len(entries), dtype=np.int64)
-        g = f.create_group('groups')
-        g['fragment_id'] = np.array(frag_ids, np.int32)
-        g['is_le'] = np.zeros(len(frag_ids), np.int8)
-        g['offsets'] = np.array(g_off, np.int64)
-        g['volume_offsets'] = np.array(v_off, np.int64)
-        g['volume_offsets_index'] = np.array(v_idx, np.int64)
-        p = f.create_group('particles')
-        for c, v in cols.items():
-            p[c] = np.array(v, np.float64 if c == 'mass' else np.int32)
-        for c, v in kin.items():
-            p[c] = np.concatenate(v)
-        i = f.create_group('inter')
-        for c, v in inter.items():
-            i[c] = np.array(v, np.float32)
-        i['offsets'] = np.array(i_off, np.int64)
-        i['reaction'] = np.array([b''] * len(inter['x']), dtype=object)
-    return out_path
 
 
 @pytest.fixture(scope='module')
@@ -135,15 +29,13 @@ def built(tmp_path_factory):
     clear_cache()
     base = tmp_path_factory.mktemp('supera')
     src = make_jaxtpc_sample(str(base / 'f1'), n_events=N_EVENTS, n_files=1)
-    root = _to_format2(src, str(base / 'f2'), [TASK])
-    hits = os.path.join(root, 'j000000', TASK, 'hits', f'sim_hits_{TASK}.h5')
-    supera = _make_supera(hits, str(base / 'supera.h5'))
-    labl_dir = base / 'labl'
-    labl_dir.mkdir()
-    labl = write_labl(supera, hits, str(labl_dir / f'sim_labl_{TASK}.h5'))
+    root = _to_tasks(src, str(base / 'f2'), [TASK])
+    task = os.path.join(root, 'j000000', TASK)
+    hits = os.path.join(task, 'hits', f'sim_hits_{TASK}.h5')
+    supera = os.path.join(task, 'supera', f'sim_supera_{TASK}.h5')
+    labl = os.path.join(task, 'labl', f'sim_labl_{TASK}.h5')
     files = {m: os.path.join(root, 'j*', '*', m, '*.h5')
-             for m in ('step', 'hits')}
-    files['labl'] = labl
+             for m in ('step', 'hits', 'labl')}
     return root, supera, hits, labl, files
 
 
@@ -180,7 +72,7 @@ def test_rows_point_where_the_ids_pointed(built):
 
 def test_dataset_labels_match_supera(built):
     root, supera, hits, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
                        modalities=('step', 'hits'))
     assert len(ds) == N_EVENTS
     with h5py.File(supera) as su, \
@@ -279,7 +171,7 @@ def test_misaligned_event_id_raises(built, tmp_path):
 
 def test_label_key_pdg_keeps_remap_configs_working(built):
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='pdg',
+    ds = JAXTPCDataset(data_root=root, files=files, labels='pdg', label_keys='all',
                        modalities=('step',))
     s = ds.get_data(0)['step']
     inst = s['instance_particle'][:, 0]
@@ -295,7 +187,7 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
     keys = ('segment_motif', 'segment_pid', 'instance_particle',
             'instance_interaction', 'is_primary', 'momentum', 'vertex')
     ds = JAXTPCDataset(
-        data_root=root, files=files, labels='motif', modalities=('step',),
+        data_root=root, files=files, labels='motif', label_keys='all', modalities=('step',),
         transform=[
             dict(type='Apply', on='step', transforms=[
                 dict(type='GridSample', grid_size=200.0, hash_type='fnv',
@@ -329,7 +221,7 @@ def test_refs_shift_through_collate_and_split(built):
     from pimm_data import collate_fn, split_event
     from pimm_data.transform import Compose
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
                        modalities=('step',))
     pipe = Compose([dict(type='Collect', parts={
         'step': dict(keys=('coord', 'group')),
@@ -364,7 +256,7 @@ def test_qs_is_derived_from_step_charge(built):
     """step.qs is each deposit's share of its group's step charge; it sums to
     one per group and needs nothing from the hits file."""
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='motif',
+    ds = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
                        modalities=('step',))
     s = ds.get_data(0)['step']
     g, qs, q = s['group'], s['qs'][:, 0], s['charge'][:, 0]
@@ -430,7 +322,7 @@ def test_deposit_in_window(built, tmp_path):
         inw = np.concatenate(got_all)
         assert 0 < inw.mean() < 1           # the window splits the sample
     files = dict(files, labl=labl)
-    x = JAXTPCDataset(data_root=root, files=files, labels='motif',
+    x = JAXTPCDataset(data_root=root, files=files, labels='motif', label_keys='all',
                       modalities=('step',)).get_data(0)
     assert np.all(np.diff(x['step']['volume_id'].ravel()) >= 0)
     np.testing.assert_array_equal(x['step']['in_window'][:, 0], inw)
@@ -478,6 +370,6 @@ def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
     assert (task_dir / 'hits').is_symlink()
     assert got.stat().st_mtime == mtime
     ds = JAXTPCDataset(data_root=str(out / 'jaxtpc_wire'), runs='j*/*',
-                       labels='motif', modalities=('step', 'hits', 'labl'))
+                       labels='motif', label_keys='all', modalities=('step', 'hits'))
     assert len(ds) == N_EVENTS
     assert 'segment_motif' in ds.get_data(0)['hits']

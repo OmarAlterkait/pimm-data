@@ -157,10 +157,11 @@ class ShardEventDataset(Dataset):
         return runs
 
     def _readers_named(self):
-        """``(modality, reader)`` for each loaded modality, in
-        ``VALID_MODALITIES`` order (the order the joint index expects)."""
+        """``(name, reader)`` for every open reader, label files included
+        (``labl`` need not be a modality to be read), in a fixed order: the
+        joint index aligns all of them."""
         return [(m, getattr(self, f'{m}_reader'))
-                for m in self.VALID_MODALITIES
+                for m in ('step', 'sensor', 'hits', 'labl')
                 if getattr(self, f'{m}_reader', None) is not None]
 
     def _build_joint_index(self, source_label, filter_label=''):
@@ -270,11 +271,9 @@ class ShardEventDataset(Dataset):
         return f"{prefix}{fname}_evt{event_num:03d}"
 
     def __del__(self):
-        for m in self.VALID_MODALITIES:
-            reader = getattr(self, f'{m}_reader', None)
-            if reader is not None:
-                try:
-                    reader.close()
-                except Exception:
-                    pass
+        for _, reader in self._readers_named():
+            try:
+                reader.close()
+            except Exception:
+                pass
 

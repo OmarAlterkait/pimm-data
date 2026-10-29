@@ -19,7 +19,7 @@ from pimm_data.transform import TRANSFORMS
 
 def _ds(root, modalities, **kw):
     defaults = dict(data_root=root, split='', dataset_name='sim',
-                    modalities=modalities, label_key='pdg', min_deposits=0,
+                    modalities=modalities, min_deposits=0,
                     max_len=2)
     defaults.update(kw)
     return JAXTPCDataset(**defaults)
@@ -28,14 +28,14 @@ def _ds(root, modalities, **kw):
 @pytest.fixture(scope='module')
 def step_sample(jaxtpc_data_root):
     """A 3D step sub-dict with labels (step.coord shape (N,3))."""
-    ds = _ds(jaxtpc_data_root, ('step', 'labl'))
+    ds = _ds(jaxtpc_data_root, ('step',), labels='pdg')
     return ds.get_data(0)
 
 
 @pytest.fixture(scope='module')
 def hits_sample(jaxtpc_data_root):
     """A 2D hits sub-dict with labels (hits.coord shape (E,2))."""
-    ds = _ds(jaxtpc_data_root, ('hits', 'labl'))
+    ds = _ds(jaxtpc_data_root, ('hits',), labels='pdg')
     return ds.get_data(0)
 
 
@@ -241,7 +241,7 @@ def test_random_rotate_on_2d_fails(hits_sample):
 def test_recipe_3d_supervised_step(jaxtpc_data_root):
     """Canonical 3D semantic seg pipeline — the one in
     configs/detector/_base_/jaxtpc_step.py."""
-    ds = _ds(jaxtpc_data_root, ('step', 'labl'),
+    ds = _ds(jaxtpc_data_root, ('step',), labels='pdg',
              transform=[
                  dict(type='Apply', on='step', transforms=[
                      dict(type='RemapSegment', scheme='motif_5cls'),
@@ -266,7 +266,7 @@ def test_recipe_3d_supervised_step(jaxtpc_data_root):
 
 def test_recipe_2d_supervised_hits(jaxtpc_data_root):
     """2D supervised-on-hits pipeline (hits+labl combo)."""
-    ds = _ds(jaxtpc_data_root, ('hits', 'labl'),
+    ds = _ds(jaxtpc_data_root, ('hits',), labels='pdg',
              transform=[
                  dict(type='Apply', on='hits', transforms=[
                      dict(type='RemapSegment', scheme='motif_5cls'),

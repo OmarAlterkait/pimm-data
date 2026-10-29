@@ -3,7 +3,7 @@
 These complement ``test_jaxtpc_task_matrix.py``: where the matrix tests
 cover every modality combination structurally (see README §Modality
 combinations), these test orthogonal concerns — volume filtering,
-label_key variants, DataLoader fork-safety, and name/split metadata.
+labels variants, DataLoader fork-safety, and name/split metadata.
 """
 
 import numpy as np
@@ -27,10 +27,9 @@ def test_volume_filter(jaxtpc_data_root):
     assert d_v0['sensor']['coord'].shape[0] < d_all['sensor']['coord'].shape[0]
 
 
-@pytest.mark.parametrize('label_key', ['pdg', 'cluster', 'interaction'])
-def test_different_label_keys(jaxtpc_data_root, label_key):
-    ds = make_ds(jaxtpc_data_root,
-                 modalities=('step', 'labl'), label_key=label_key)
+@pytest.mark.parametrize('labels', ['motif', 'pid', 'pdg', 'particle'])
+def test_different_labels(jaxtpc_data_root, labels):
+    ds = make_ds(jaxtpc_data_root, modalities=('step',), labels=labels)
     d = ds.get_data(0)
     assert len(np.unique(d['step']['segment'])) > 1
 
@@ -53,8 +52,8 @@ def test_name_and_split(jaxtpc_data_root):
 def test_dataloader_workers(jaxtpc_data_root):
     """Dataset is fork-safe via lazy h5py_worker_init()."""
     import torch
-    ds = make_ds(jaxtpc_data_root, modalities=('step', 'labl'),
-                 label_key='pdg', min_deposits=0)
+    ds = make_ds(jaxtpc_data_root, modalities=('step',),
+                 labels='pdg', min_deposits=0)
     if len(ds) < 2:
         pytest.skip("Need at least 2 events")
     loader = torch.utils.data.DataLoader(
@@ -94,7 +93,7 @@ def test_volume_filter_prunes_groups(tmp_path):
     from pimm_data.testing import make_jaxtpc_sample
     root = make_jaxtpc_sample(str(tmp_path), n_events=2, n_volumes=2)
     kw = dict(data_root=root, split='', dataset_name='sim',
-              modalities=('hits', 'labl'))
+              modalities=('hits',), labels='motif')
     g_all = JAXTPCDataset(**kw).get_data(0)['group']['volume']
     g_v0 = JAXTPCDataset(volume=0, **kw).get_data(0)['group']['volume']
     assert set(np.unique(g_all)) == {0, 1}
@@ -111,10 +110,10 @@ def test_min_deposits_cached_scan_matches_direct(tmp_path):
     clear_cache()
     root = make_jaxtpc_sample(str(tmp_path), n_events=4, n_volumes=2)
     step = os.path.join(root, 'step', 'sim_step_0000.h5')
-    # zero event_001's deposits so min_deposits=1 must drop exactly it
+    # zero entry_000001's deposits so min_deposits=1 must drop exactly it
     with h5py.File(step, 'r+') as f:
-        for vk in [k for k in f['event_001'] if k.startswith('volume_')]:
-            f['event_001'][vk].attrs['n_actual'] = 0
+        for vk in [k for k in f['entry_000001'] if k.startswith('volume_')]:
+            f['entry_000001'][vk].attrs['n_actual'] = 0
     clear_cache()
     ds = JAXTPCDataset(data_root=root, split='', dataset_name='sim',
                        modalities=('step',), min_deposits=1)

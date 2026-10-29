@@ -57,7 +57,7 @@ def default_split(dataset):
 
 def default_modalities(dataset):
     if dataset == 'jaxtpc':
-        return ('step', 'sensor', 'hits')        # doraemon has no labl/
+        return ('step', 'sensor', 'hits')
     return ('step', 'sensor', 'hits', 'labl')
 
 

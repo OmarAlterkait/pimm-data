@@ -55,12 +55,10 @@ def test_pixel_hits_coord_is_3d_with_group_id(jaxtpc_pixel_data_root):
     assert s['hits']['coord'].shape[1] == 3
     for plane in s['hits']['planes']:
         assert plane.endswith('_Pixel')
-        cols = s['hits']['raw'][plane]
-        assert set(cols.keys()) == {'py', 'pz', 'time', 'charge', 'group_id'}
     # group = the entry's group_id, offset into the event-wide group part
-    gid = np.concatenate(
-        [s['hits']['raw'][p]['group_id'] for p in s['hits']['planes']])
-    vol = np.concatenate([np.full(len(s['hits']['raw'][p]['group_id']),
+    raw = ds.hits_reader.read_event(ds.data_list[0])
+    gid = np.concatenate([raw[f'hits.{p}.group_id'] for p in s['hits']['planes']])
+    vol = np.concatenate([np.full(len(raw[f'hits.{p}.group_id']),
                                   int(p.split('_')[1]))
                           for p in s['hits']['planes']])
     base = {v: int(np.argmax(s['group']['volume'] == v)) for v in set(vol)}
@@ -83,12 +81,11 @@ def test_pixel_volume_filter_uses_pixel_plane(jaxtpc_pixel_data_root):
 def test_pixel_labl_decoration(jaxtpc_pixel_data_root):
     ds = JAXTPCDataset(
         data_root=jaxtpc_pixel_data_root, split='',
-        modalities=('step', 'hits', 'labl'), label_key='pdg')
+        modalities=('step', 'hits'), labels='pdg')
     s = ds[0]
-    # step gains instance/segment via labl join
+    # step and hits gain instance/segment through their group
     assert 'instance' in s['step']
     assert 'segment' in s['step']
-    # hits gains segment via group_to_track → track_pdg chain
     assert 'segment' in s['hits']
     assert s['hits']['segment'].shape == (s['hits']['coord'].shape[0],)
     # not all -1 (synth fixture guarantees matched FKs)

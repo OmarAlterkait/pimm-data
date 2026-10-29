@@ -29,7 +29,7 @@ from pimm_data.readers.jaxtpc_sensor import JAXTPCSensorReader
 
 from _joint_index_helpers import readers as _readers, assert_aligned as _assert_aligned
 
-_ALL = ('step', 'sensor', 'hits', 'labl')
+_ALL = ('step', 'sensor', 'hits')
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ _ALL = ('step', 'sensor', 'hits', 'labl')
 
 def test_no_gap_all_modalities_aligned(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL)
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
     assert len(ds) == 3
     _assert_aligned(ds)
     # get_data must succeed and stay FK-consistent for every idx.
@@ -51,13 +51,13 @@ def test_no_gap_all_modalities_aligned(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_gap_in_one_modality_realigns(tmp_path):
-    """event_001 missing from sensor only → joint excludes it everywhere."""
+    """entry_000001 missing from sensor only → joint excludes it everywhere."""
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
-        del f['event_001']                       # present in step/hits/labl
+        del f['entry_000001']                       # present in step/hits/labl
 
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL)
-    # Joint = intersection = {0, 2}; event_001 dropped from EVERY modality.
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
+    # Joint = intersection = {0, 2}; entry_000001 dropped from EVERY modality.
     assert len(ds) == 2
     for r in _readers(ds):
         assert r.indices[0].tolist() == [0, 2]
@@ -74,7 +74,7 @@ def test_raw_readers_desync_without_joint_index(tmp_path):
     """
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
-        del f['event_001']
+        del f['entry_000001']
 
     step = JAXTPCStepReader(data_root=os.path.join(root, 'step'), split='',
                             dataset_name='sim')
@@ -95,14 +95,14 @@ def test_raw_readers_desync_without_joint_index(tmp_path):
 def test_min_deposits_desync_realigns(tmp_path):
     """min_deposits drops a low-deposit step event; joint drops it everywhere."""
     root = make_jaxtpc_sample(str(tmp_path), n_events=3, n_volumes=2)
-    # Zero event_001's deposits in step so min_deposits filters it from step
-    # only (sensor/hits/labl still hold event_001).
+    # Zero entry_000001's deposits in step so min_deposits filters it from step
+    # only (sensor/hits/labl still hold entry_000001).
     with h5py.File(os.path.join(root, 'step', 'sim_step_0000.h5'), 'r+') as f:
-        evt = f['event_001']
+        evt = f['entry_000001']
         for vk in [k for k in evt if k.startswith('volume_')]:
             evt[vk].attrs['n_actual'] = 0
 
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif',
                        min_deposits=1)
     assert len(ds) == 2
     for r in _readers(ds):
@@ -119,7 +119,7 @@ def test_min_deposits_desync_realigns(tmp_path):
 def test_min_deposits_without_step_raises(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=2)
     with pytest.raises(ValueError, match="min_deposits"):
-        JAXTPCDataset(data_root=root, split='', modalities=('hits', 'labl'),
+        JAXTPCDataset(data_root=root, split='', modalities=('hits',), labels='motif',
                       min_deposits=5)
 
 
@@ -131,10 +131,10 @@ def test_min_deposits_is_volume_aware(tmp_path):
     """
     root = make_jaxtpc_sample(str(tmp_path), n_events=2, n_volumes=2)
     with h5py.File(os.path.join(root, 'step', 'sim_step_0000.h5'), 'r+') as f:
-        f['event_000']['volume_0'].attrs['n_actual'] = 0   # vol 0 empty here
+        f['entry_000000']['volume_0'].attrs['n_actual'] = 0   # vol 0 empty here
 
     step_dir = os.path.join(root, 'step')
-    # Volume-aware: counting only volume 0 excludes event_000.
+    # Volume-aware: counting only volume 0 excludes entry_000000.
     r_v0 = JAXTPCStepReader(data_root=step_dir, split='', dataset_name='sim',
                             min_deposits=1, volume=0)
     assert r_v0.indices[0].tolist() == [1]
@@ -151,10 +151,10 @@ def test_min_deposits_is_volume_aware(tmp_path):
 def test_strict_lengths_raises_on_cross_modality_drop(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
-        del f['event_001']
+        del f['entry_000001']
     with pytest.raises(ValueError):
-        JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+        JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif',
                       strict_lengths=True)
     # Default (non-strict) just warns and proceeds.
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL)
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='motif')
     assert len(ds) == 2

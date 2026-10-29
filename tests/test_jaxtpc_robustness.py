@@ -67,14 +67,14 @@ def test_reader_tolerates_missing_event(tmp_path, modality, reader_cls):
     path = os.path.join(root, modality, f'sim_{modality}_0000.h5')
     with h5py.File(path, 'r+') as f:
         assert int(f['config'].attrs['n_events']) == 3
-        del f['event_001']  # production-style gap; n_events stays 3
+        del f['entry_000001']  # production-style gap; n_events stays 3
 
     r = reader_cls(data_root=os.path.join(root, modality),
                    split='', dataset_name='sim')
     assert len(r) == 2                       # only present events counted
     assert r.indices[0].tolist() == [0, 2]   # gap skipped, order preserved
-    r.read_event(0)                          # event_000
-    r.read_event(1)                          # maps to event_002, no KeyError
+    r.read_event(0)                          # entry_000000
+    r.read_event(1)                          # maps to entry_000002, no KeyError
 
 
 @pytest.mark.parametrize('modality,reader_cls', [

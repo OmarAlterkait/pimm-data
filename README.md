@@ -28,7 +28,8 @@ pip install -e /path/to/pimm-data
 ```python
 from pimm_data import JAXTPCDataset
 
-ds = JAXTPCDataset(data_root="/path/to/jaxtpc_data", split="", modalities=("step", "labl"))
+ds = JAXTPCDataset(data_root="/path/to/jaxtpc_data", split="", modalities=("step",),
+                   labels="motif")
 sample = ds.get_data(0)          # numpy arrays, no transforms
 print(sample["step"].keys())     # coord, energy, volume_id, segment, instance, ...
 ```
@@ -68,10 +69,9 @@ ds = JAXTPCDataset(
     data_root="/path/to/jaxtpc_data",
     split="",
     modalities=("step",),
-    labels="pdg",                       # labl is a label source (attaches segment/instance)
+    labels="motif",                     # read labl; segment = motif class
     transform=[
         dict(type="Apply", on="step", transforms=[
-            dict(type="RemapSegment", scheme="motif_5cls"),
             dict(type="GridSample", grid_size=0.5, mode="train",
                  return_grid_coord=True),
         ]),
@@ -97,11 +97,10 @@ batch = next(iter(loader))
 > sit directly in `data_root/step/` with no split subdirectory, pass
 > `split=''`.
 
-> **`labels=`** opt-in attaches `segment`/`instance` from `labl` (JAXTPC:
-> `labels='pdg'|'cluster'|'interaction'|'ancestor'` picks the source column;
-> LUCiD: `labels=True`). `labl` is a *label source*, not a modality — prefer
-> `labels=` over putting `'labl'` in `modalities` (still accepted, deprecated).
-> Use `RemapSegment` to map raw values to task-specific class indices.
+> **`labels=`** reads `labl` and attaches `segment`/`instance` (JAXTPC:
+> `labels='motif'|'pid'|'pdg'|'particle'|'interaction'` picks `segment`, and
+> `label_keys=` adds further per-point keys; LUCiD: `labels=True`). For JAXTPC
+> `labl` is not a modality (see docs/LABELS.md).
 
 ---
 
@@ -114,7 +113,7 @@ batch = next(iter(loader))
 | `step`   | 3D energy deposits (one row per Geant4 simulation step) | Standard HEP abbreviation. |
 | `sensor` | Aggregated detector readout (pixels, wires, or PMTs) | What the detector measures. |
 | `hits`   | Per-particle charge attribution at sensor elements | Natural detector term ("PMT hits" in WC, "track hits" in TPC). |
-| `labl`   | Metadata dimension tables (PDG, interaction, ancestry) | Short for "labels." |
+| `labl`   | Label tables (JAXTPC: pysupera's; read via `labels=`) | Short for "labels." |
 
 These appear as directory names (`step/`), HDF5 file tags
 (`sim_step_0000.h5`), and top-level keys (`data['step']`).
@@ -127,13 +126,12 @@ These appear as directory names (`step/`), HDF5 file tags
 | `instance` | Instance segmentation ID per point | `data['step']['instance']`, `data['hits']['instance']` |
 
 `segment` and `instance` are **not** modalities — they are per-point
-label columns attached when `labl` is in the modalities tuple.
+label columns attached when labels are requested.
 
 ### Foreign-key arrays
 
 | FK array | Meaning | Scope |
 |----------|---------|-------|
-| `deposit_to_track` | Step deposit → track ID | Per volume, in `labl` |
 | `deposit_to_group` | Step deposit → hits group ID | Per volume, in the hits file; loaded as `step.group` |
 | `group_to_track`   | Hits group → track ID | Per volume, in the hits file (supera `labl`: `group_track`) |
 
@@ -141,8 +139,9 @@ All are suffixed `_v{N}` for multi-volume detectors (e.g. `deposit_to_group_v0`)
 
 ### The `group` part
 
-`group` appears whenever `hits` is loaded (JAXTPC only): one row per JAXTPC
-group, event-wide (`volume`; with a supera `labl` also `track`, `fragment`).
+`group` appears whenever `hits` is loaded or `labels=` is set (JAXTPC only):
+one row per JAXTPC group, event-wide (`volume`; with labels also `track`,
+`fragment`).
 `step.group` and `hits.group` reference it, and `step.qs` is each deposit's
 share of its group's charge. It is the step <-> hits correspondence, with or
 without labels.
@@ -210,14 +209,11 @@ Each modality produces a sub-dict at a top-level key of the same name.
 | `step`   | 3D truth deposits (one row per Geant4 step) | 3D |
 | `sensor` | Raw sparse detector response | 2D (wire), 3D (pixel, PMT) |
 | `hits`   | Per-particle decomposition of `sensor` | same as `sensor` |
-| `labl`   | Dimension tables: per-track metadata | — |
 
-`labl` has no point cloud — it attaches `segment` and `instance`
-columns to an instance-bearing modality (`step` or `hits`). Two
-combinations are rejected:
-
-- `('labl',)` — nothing to join against.
-- `('sensor', 'labl')` — `sensor` is aggregated, no per-particle info.
+JAXTPC takes `step`, `sensor`, `hits` in any combination; `labels=` adds the
+label tables and per-point labels on `step`/`hits` (it needs one of them).
+LUCiD also accepts `labl` as a modality; `('labl',)` and `('sensor', 'labl')`
+are rejected there (nothing to join against).
 
 ---
 
@@ -232,8 +228,9 @@ data = ds.get_data(idx)
 #     'step':    {...},    # when 'step' in modalities
 #     'sensor':  {...},    # when 'sensor' in modalities
 #     'hits':    {...},    # when 'hits' in modalities
-#     'labl':    {...},    # when 'labl' in modalities
-#     'group':   {...},    # JAXTPC only, when 'hits' in modalities
+#     'labl':    {...},    # LUCiD, when 'labl' in modalities
+#     'group':   {...},    # JAXTPC, when 'hits' is loaded or labels= is set
+#     'track', 'particle', 'interaction': {...},   # JAXTPC, labels= only
 # }
 ```
 
@@ -250,9 +247,12 @@ data['step'] = {
     # include_physics=True (default):
     'dx': (N, 1), 'theta': (N, 1), 'phi': (N, 1),
     'charge': (N, 1), 'photons': (N, 1), 't0_us': (N, 1),
-    # present only when 'labl' is also in modalities:
-    'instance': (N,) int32,     # = raw Geant4 track_id
-    'segment':  (N,) int32,     # = track_{label_key} value
+    # hits loaded or labels= set:
+    'group':    (N,) int32,     # ref -> group (-1: no group)
+    'qs':       (N, 1) float32, # share of its group's charge
+    # labels= only:
+    'segment':  (N,) int32,     # labels= class (motif, pid, pdg, ...)
+    'instance': (N,) int32,     # particle (instance) row
 }
 
 data['sensor'] = {
@@ -271,22 +271,16 @@ data['hits'] = {
     'group':        (E,) int32,        # ref -> group
     'planes':       [str, ...],
     'readout_type': 'wire' | 'pixel',
-    'raw': {plane_label: {...}},
-    # present only when 'labl' is also in modalities:
-    'segment':      (E,) int32,        # = track_{label_key} via group_to_track
-    'instance':     (E,) int32,        # track labl: group_id; supera: particle
+    # labels= only:
+    'segment':      (E,) int32,
+    'instance':     (E,) int32,
 }
 
-data['labl'] = {              # keyed by volume
-    'v0': {'track_ids': (T0,), 'deposit_to_track': (N_v0,),
-           'track_pdg': (T0,), 'track_cluster': (T0,),
-           'track_interaction': (T0,), 'track_ancestor': (T0,)},
-    'v1': {...},
+data['group'] = {             # hits loaded or labels= set
+    'volume': (G,) int32,        # + 'track', 'fragment' with labels=
 }
-
-data['group'] = {             # only when 'hits' is loaded
-    'volume': (G,) int32,        # + 'track', 'fragment' with a supera labl
-}
+# labels= only: data['track'], data['particle'], data['interaction']
+# (pysupera's tables, docs/LABELS.md)
 ```
 
 ### LUCiD sub-dicts
@@ -344,20 +338,19 @@ need per-vertex grouping.
 
 | Dataset | Modality | `instance` = |
 |---------|----------|-------------|
-| JAXTPC  | `step`   | `track_id` (raw Geant4 track ID) |
-| JAXTPC  | `hits`   | `group_id` (hits' native grouping) |
+| JAXTPC  | both     | particle (instance) row of `data['particle']` |
 | LUCiD   | both     | `particle_idx` (FK into labl.particle) |
 
 If a task needs uniform instance convention, remap in a transform.
 
-**Segment** carries raw label values controlled by `label_key`:
+**Segment**:
 
-| Dataset | Source | Raw values |
+| Dataset | Source | Values |
 |---------|--------|------------|
-| JAXTPC  | `track_{label_key}` | PDG codes (default), cluster IDs, etc. |
+| JAXTPC  | `labels=` | motif / PID classes, or raw PDG (`'pdg'`) |
 | LUCiD   | `labl.particle.category` | Detector-specific category integers |
 
-Use `RemapSegment` to map raw values to dense class indices:
+Use `RemapSegment` to map raw values (e.g. `labels='pdg'`) to dense class indices:
 
 ```python
 dict(type='RemapSegment', scheme='motif_5cls')
@@ -595,13 +588,14 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 |---|---|---|---|
 | `data_root` | str | *(required)* | Root directory with modality subdirectories |
 | `split` | str | `'train'` | Split subdirectory. Pass `''` for flat layouts. |
-| `modalities` | tuple | `('step',)` | Subset of `'step'`, `'sensor'`, `'hits'`, `'labl'` |
+| `modalities` | tuple | `('step',)` | Subset of `'step'`, `'sensor'`, `'hits'` |
 | `dataset_name` | str | `'sim'` | File prefix (matches `sim_step_*.h5`) |
 | `volume` | int/None | `None` | Single-volume filter. `None` = all volumes. |
-| `label_key` | str | `'pdg'` | Labl column for `segment`: `'pdg'`, `'cluster'`, `'interaction'`, `'ancestor'` |
+| `labels` | str/None | `None` | Read `labl`; `segment` = `'motif'`, `'pid'`, `'pdg'`, `'particle'` or `'interaction'` |
+| `label_keys` | tuple/`'all'` | `()` | Further per-point keys from `_resolve.PRESETS['pilarnet']` |
+| `momentum` | str | `'start'` | `momentum` key: `|p|` at creation or first visible step (`'first'`) |
 | `min_deposits` | int | `0` | Drop events with fewer deposits |
 | `include_physics` | bool | `True` | Load dx, theta, phi, charge, photons, t0_us |
-| `label_keys` | list/None | `None` | Whitelist of labl datasets to load (`None` = all) |
 | `transform` | list/None | `None` | List of transform dicts (NOT a Compose object) |
 | `max_len` | int | `-1` | Cap on event count (`-1` = no cap) |
 | `cache` | bool | `False` | Shared-memory caching (requires `SharedArray`) |

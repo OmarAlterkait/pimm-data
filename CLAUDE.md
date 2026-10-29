@@ -40,7 +40,7 @@ readers/ (HDF5 → flat dict)  →  jaxtpc.py / lucid.py (flat → nested)  → 
    subclass `ShardEventDataset` (`_dataset_base.py`). They
    wire together per-modality readers, join `labl` dimension tables onto
    `step`/`hits` point clouds, and emit a **nested** dict keyed by modality
-   (`{'step': {...}, 'hits': {...}, 'group': {...}, 'labl': {...}}`).
+   (`{'step': {...}, 'hits': {...}, 'group': {...}, ...}`).
    `get_data(idx)` returns raw numpy; `__getitem__` runs the transform
    pipeline. `OpticalDataset` is single-modality (`sensor`) PMT light: each
    `sensor` row is a waveform **chunk**; the raw samples are a packed **second
@@ -68,7 +68,7 @@ both decorating it and importing the module from `__init__.py`.
 
 ### Nested-dict output and `Apply` / `Collect`
 
-Datasets emit `{'step': {...}, 'sensor': {...}, 'hits': {...}, 'labl': {...}}`.
+Datasets emit `{'step': {...}, 'sensor': {...}, 'hits': {...}, ...}`.
 There is **no bare `coord` at the top level**. Transforms that hardcode
 `'coord'`/`'segment'` must be scoped to a part with `Apply(on=…)` (a tuple
 `on=` shares one RNG draw across parts). `Apply` is the only spelling —
@@ -127,18 +127,15 @@ a working verifier.
 | `hits`   | Per-particle decomposition of `sensor` (instance-resolved) |
 | `labl`   | Dimension tables (PDG, interaction, ancestry) |
 
-`labl` has no point cloud — it joins onto `step`/`hits` to populate per-
-point `segment` and `instance` columns. `('labl',)` alone and
-`('sensor', 'labl')` are rejected (no instance separation to join against).
-
-JAXTPC's FK chain (per volume, suffix `_v{N}`):
-`step deposit → deposit_to_track → labl.track_ids → track_{label_key}`,
-and `hits group → group_to_track → labl.track_ids → track_{label_key}`.
-Whenever hits is loaded JAXTPC also returns a `group` part (event-wide JAXTPC
-groups), referenced by `step.group` / `hits.group` (`('ref','group')`) plus
-`step.qs` — the step <-> hits correspondence, labels or not. There is no
-`bridges` part. With a supera `labl`, labels are walks from `group`
-(docs/LABELS.md).
+JAXTPC: modalities are `step`/`sensor`/`hits`. Whenever hits is loaded or
+`labels=` is set there is a `group` part (event-wide JAXTPC groups),
+referenced by `step.group` / `hits.group` (`('ref','group')`) plus `step.qs` —
+the step <-> hits correspondence, labels or not. `labels=` reads the `labl`
+file (pysupera's labels, written by `supera_labl.py`) into `track`,
+`particle`, `interaction` parts and puts `segment`/`instance` on step/hits
+points; `label_keys=` adds more per-point keys (each a lookup over every
+point). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
+`step`/`hits`; `('labl',)` and `('sensor', 'labl')` are rejected there.
 
 ### Detector-specific quirks
 
@@ -146,10 +143,8 @@ groups), referenced by `step.group` / `hits.group` (`('ref','group')`) plus
   sensor/hits HDF5. Coord dimensionality and the per-volume plane filter
   (`volume=N`) depend on it — see `jaxtpc.py:_coord_keys` and the post-
   detection plane-filter block in `__init__`.
-- **`label_key`** (JAXTPC) selects which `labl` column becomes `segment`:
-  `'pdg'` (default), `'cluster'`, `'interaction'`, `'ancestor'`. Raw values
-  flow through — use `RemapSegment(scheme='motif_5cls')` to convert to
-  dense class indices.
+- **`labels`** (JAXTPC) picks `segment`: `'motif'`, `'pid'`, `'pdg'` (raw;
+  use `RemapSegment` for class indices), `'particle'`, `'interaction'`.
 - **LUCiD** requires `format_version >= 3` shards. `instance` is
   `particle_idx`; `segment` is `labl.particle.category`.
 - **Optical** (`optical.py`, `readers/optical_sensor.py`) reads goop PMT-light
@@ -185,5 +180,6 @@ auto-skip when both env vars are unset (collection-time skip, see
 
 `pimm_data.testing` regenerates a minimal but cross-modality-consistent
 v3 fixture from pure numpy + h5py. Cross-modality invariants (e.g.
-`labl.deposit_to_track[i] == hits.group_to_track[hits.deposit_to_group[i]]`)
+`hits.deposit_to_group` indexes `hits.group_to_track`; JAXTPC `labl` is made by
+running `supera_labl.write_labl` on a synthetic pysupera file)
 are encoded there; preserve them when changing reader behaviour.
