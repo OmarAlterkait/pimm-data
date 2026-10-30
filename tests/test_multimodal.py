@@ -207,3 +207,18 @@ def test_event_identity_shape(tmp_path):
     cid, file_index, sei = ds.event_identity(0)
     assert cid == 5
     assert isinstance(file_index, int) and isinstance(sei, int)
+
+
+def test_wrapper_splits_the_tail_off(tmp_path):
+    """The post-Collect tail is batch_transform here too, not run per event."""
+    from pimm_data import MultiModalEventDataset
+    from pimm_data.testing import make_jaxtpc_sample
+    root = make_jaxtpc_sample(str(tmp_path / 'j'), n_events=2)
+    ds = MultiModalEventDataset(
+        _SRC, [dict(root=root)],
+        transform=[dict(type='Collect', part='step', keys=('coord',),
+                        feat_keys=('coord',)),
+                   dict(type='ToDevice', device='cpu')])
+    assert [type(t).__name__ for t in ds.transform.transforms] == ['Collect']
+    assert [type(t).__name__ for t in ds.batch_transform.transforms] == \
+        ['ToDevice']

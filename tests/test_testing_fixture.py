@@ -43,3 +43,30 @@ def test_pixel_readout_gets_one_plane_of_geometry(tmp_path):
     with h5py.File(f"{root}/step/sim_pix_step_0000.h5") as f:
         assert f["config"]["num_wires"][:].shape == (2, 1)
         assert f["config"]["volume_ranges"][:].shape == (2, 3, 2)
+
+
+def test_sensor_config_carries_the_detector_tables(tmp_path):
+    """num_wires / pedestals / volume_ranges in the sensor file's /config, as
+    in production (helix reads its sensor layout from there), and the step
+    file describes the same detector."""
+    import h5py
+    import numpy as np
+
+    from pimm_data.testing import make_jaxtpc_sample
+
+    root = make_jaxtpc_sample(str(tmp_path / "d"), dataset_name="sim_wire",
+                              n_events=2, n_volumes=2, readout_type="wire")
+    with h5py.File(f"{root}/sensor/sim_wire_sensor_0000.h5") as s, \
+            h5py.File(f"{root}/step/sim_wire_step_0000.h5") as st:
+        cfg = s["config"]
+        nw, ped = cfg["num_wires"][:], cfg["pedestals"][:]
+        assert nw.shape == ped.shape == (2, 3) and nw.dtype == np.int32
+        assert cfg.attrs["format_version"] == 2
+        np.testing.assert_array_equal(nw, st["config"]["num_wires"][:])
+        np.testing.assert_array_equal(cfg["volume_ranges"][:],
+                                      st["config"]["volume_ranges"][:])
+        # every plane's own n_wires attr agrees with the table
+        e = s["entry_000000"]
+        for v in range(2):
+            for i, p in enumerate("UVY"):
+                assert e[f"volume_{v}/{p}"].attrs["n_wires"] == nw[v, i]

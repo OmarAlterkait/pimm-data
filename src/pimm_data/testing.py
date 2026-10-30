@@ -61,20 +61,18 @@ def _stamp_step_geometry(outdir, dataset_name, n_files, n_volumes, readout_type)
     import h5py
     import numpy as np
 
-    n_planes = 3 if readout_type == 'wire' else 1
-    num_wires = np.tile(np.array([1969, 1969, 1443][:n_planes], dtype=np.int32),
-                        (n_volumes, 1))
-    half = 2160.0
-    ranges = np.zeros((n_volumes, 3, 2), dtype=np.float32)
-    edges = np.linspace(-half, half, n_volumes + 1, dtype=np.float32)
-    for v in range(n_volumes):
-        ranges[v, 0] = (edges[v], edges[v + 1])
-        ranges[v, 1] = (-half, half)
-        ranges[v, 2] = (-half, half)
-
+    ranges = _volume_ranges(n_volumes)
     for file_idx in range(n_files):
         path = os.path.join(outdir, 'step',
                             f'{dataset_name}_step_{file_idx:04d}.h5')
+        if readout_type == 'wire':
+            # the same detector the sensor file describes, as in production
+            sensor = os.path.join(outdir, 'sensor',
+                                  f'{dataset_name}_sensor_{file_idx:04d}.h5')
+            with h5py.File(sensor, 'r') as sf:
+                num_wires = sf['config']['num_wires'][:]
+        else:
+            num_wires = np.full((n_volumes, 1), 1969, dtype=np.int32)
         with h5py.File(path, 'a') as f:
             cfg = f.require_group('config')
             for name, data in (('num_wires', num_wires),
@@ -123,7 +121,22 @@ def _stamp_source_event_idx(outdir, dataset_name, modalities, n_files,
 # ---------------------------------------------------------------------------
 
 _JAXTPC_PLANES = ('U', 'V', 'Y')
+
+
+def _volume_ranges(n_volumes):
+    """(n_vol, 3, 2) float32: each volume's (min, max) along x/y/z, the volumes
+    tiling x and sharing y/z, as in a real shard."""
+    half = 2160.0
+    ranges = np.zeros((n_volumes, 3, 2), dtype=np.float32)
+    edges = np.linspace(-half, half, n_volumes + 1, dtype=np.float32)
+    for v in range(n_volumes):
+        ranges[v, 0] = (edges[v], edges[v + 1])
+        ranges[v, 1] = (-half, half)
+        ranges[v, 2] = (-half, half)
+    return ranges
 EVENT_ID_BASE = 1000      # event ids deliberately unlike positions
+#: SBND's wire readout grid (doraemon 1M sensor files), for ``detector=``.
+SBND_WIRE = dict(num_wires=(1969, 1969, 1443), num_time_steps=4321)
 _JAXTPC_POS_STEP_MM = 0.05
 _JAXTPC_POS_ORIGIN = (-2160.0, -2160.0, -2160.0)
 
@@ -131,7 +144,7 @@ _JAXTPC_POS_ORIGIN = (-2160.0, -2160.0, -2160.0)
 def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
                        n_volumes=2, n_deposits=60, n_groups=6, n_tracks=6,
                        n_pixels_per_plane=40, readout_type='wire', seed=0,
-                       event_id_base=EVENT_ID_BASE):
+                       event_id_base=EVENT_ID_BASE, detector=None):
     """Write a minimal JAXTPC format-2 dataset with its ``labl``.
 
     Creates ``{outdir}/{step,sensor,hits,labl}/{dataset_name}_{mod}_NNNN.h5``
@@ -144,6 +157,12 @@ def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
 
     ``readout_type`` is ``'wire'`` (three U/V/Y planes per volume) or
     ``'pixel'`` (single ``Pixel`` plane per volume; coord adds a pz axis).
+
+    ``detector`` (wire): the readout grid the files declare, as
+    ``dict(num_wires=(U, V, Y), num_time_steps=T)``, e.g. SBND's
+    :data:`SBND_WIRE`, for a consumer that checks files against its detector.
+    By default the grid is the smallest that holds the synthetic data, which
+    keeps dense grids small.
     """
     from .supera_labl import write_labl
     assert readout_type in ('wire', 'pixel'), readout_type
@@ -163,10 +182,12 @@ def make_jaxtpc_sample(outdir, dataset_name='sim', n_events=2, n_files=1,
         path = lambda mod: os.path.join(
             outdir, mod, f'{dataset_name}_{mod}_{file_idx:04d}.h5')
         _write_jaxtpc_step(path('step'), events, ids)
-        _write_jaxtpc_sensor(path('sensor'), events, ids, readout_type)
+        _write_jaxtpc_sensor(path('sensor'), events, ids, readout_type,
+                             detector)
         _write_jaxtpc_hits(path('hits'), events, ids, readout_type)
         make_supera(path('hits'), path('supera'), seed=seed + file_idx)
-        write_labl(path('supera'), path('hits'), path('labl'))
+        write_labl(path('supera'), path('hits'), path('labl'),
+                   compression='gzip')     # no filter plugin needed
 
     _stamp_step_geometry(outdir, dataset_name, n_files, n_volumes, readout_type)
     return outdir
@@ -316,6 +337,11 @@ def _format2(f, ids):
     cfg = f.create_group('config')
     cfg.attrs['format_version'] = 2
     cfg.attrs['n_events'] = len(ids)
+    # the provenance every production file carries
+    cfg.attrs['production_version'] = 'synthetic'
+    cfg.attrs['git_repo'] = 'pimm_data.testing'
+    cfg.attrs['git_commit'] = 'synthetic'
+    cfg.attrs['git_dirty'] = False
     ev = f.create_group('dprod/events')
     ev.attrs['order'] = 'sorted'
     ev.create_dataset('event_id', data=np.asarray(ids, np.int64))
@@ -346,7 +372,7 @@ def _write_jaxtpc_step(path, events, ids):
                     vg.create_dataset(k, data=v[k])
 
 
-def _write_jaxtpc_sensor(path, events, ids, readout_type='wire'):
+def _write_jaxtpc_sensor(path, events, ids, readout_type='wire', detector=None):
     with h5py.File(path, 'w') as f:
         cfg, entries = _format2(f, ids)
         cfg.attrs['readout_type'] = readout_type
@@ -366,6 +392,23 @@ def _write_jaxtpc_sensor(path, events, ids, readout_type='wire'):
                     for pn, plane in v['planes'].items():
                         nwires_by_type[pn] = max(nwires_by_type.get(pn, 0),
                                                  int(plane['n_wires']))
+            if detector is not None:
+                want = dict(zip(_JAXTPC_PLANES, detector['num_wires']))
+                n_t = int(detector['num_time_steps'])
+                if any(want[p] < nwires_by_type[p] for p in want) \
+                        or n_t < cfg.attrs['num_time_steps']:
+                    raise ValueError(f"detector={detector} is smaller than "
+                                     f"the synthetic data")
+                nwires_by_type, cfg.attrs['num_time_steps'] = want, n_t
+            # the detector tables a real sensor file carries in /config
+            n_vol = len(events[0])
+            cfg.create_dataset('num_wires', data=np.array(
+                [[nwires_by_type[p] for p in _JAXTPC_PLANES]] * n_vol,
+                dtype=np.int32))
+            cfg.create_dataset('pedestals', data=np.array(
+                [[events[0][0]['planes'][p]['pedestal'] for p in _JAXTPC_PLANES]]
+                * n_vol, dtype=np.int32))
+            cfg.create_dataset('volume_ranges', data=_volume_ranges(n_vol))
         for evt, volumes in zip(entries, events):
             for v in volumes:
                 vg = evt.create_group(f'volume_{v["vol_idx"]}')

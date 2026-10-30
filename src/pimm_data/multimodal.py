@@ -126,7 +126,13 @@ class MultiModalEventDataset(Dataset):
         self._max_events_per_source = int(max_events_per_source)
         self._min_points = int(min_points)
         self._mixture = mixture or {}
-        self.transform = Compose(transform)
+        # the same split as every dataset: per-event head (... Collect) runs in
+        # the workers, the post-collate tail (ToDevice, Densify, ...) is
+        # batch_transform, for the trainer to run on the batch
+        from ._dataset_base import ShardEventDataset
+        head, tail = ShardEventDataset._split_at_collect(transform)
+        self.transform = Compose(head)
+        self.batch_transform = Compose(tail) if tail else None
         self.loop = int(loop)
         self.ignore_index = ignore_index
         self.test_mode = False

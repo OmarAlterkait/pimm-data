@@ -55,7 +55,6 @@ import sys
 import time
 
 import h5py
-import hdf5plugin
 import numpy as np
 
 LABL_FORMAT = 'supera-labl/1'
@@ -213,10 +212,12 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
         raise ValueError('give step_path and sensor_path together')
     win = _window(sensor_path) if sensor_path is not None else None
     st = h5py.File(step_path, 'r') if step_path is not None else None
-    comp = ({'compression': 'gzip', 'compression_opts': 4}
-            if compression == 'gzip' else
-            hdf5plugin.Blosc(cname='lz4', clevel=5,
-                             shuffle=hdf5plugin.Blosc.SHUFFLE))
+    if compression == 'gzip':
+        comp = {'compression': 'gzip', 'compression_opts': 4}
+    else:
+        import hdf5plugin       # only the lz4 filter needs the plugin
+        comp = hdf5plugin.Blosc(cname='lz4', clevel=5,
+                                shuffle=hdf5plugin.Blosc.SHUFFLE)
     with h5py.File(supera_path, 'r') as su, h5py.File(hits_path, 'r') as hi, \
             h5py.File(out_path + '.tmp', 'w') as out:
         fmt = su['format_version'][()]
