@@ -457,8 +457,10 @@ def _write_jaxtpc_hits(path, events, ids, readout_type='wire'):
 
 
 #: (pdg, sem_type) of the fragment rows of every synthetic pysupera event;
-#: rows 0..2 head instances, fragments 3, 4 belong to instance 0 and 5 to 1.
-SUPERA_FRAGMENTS = ((13, 2), (22, 1), (2212, 5), (11, 3), (11, 4), (321, 2))
+#: rows 0..2 head instances, fragments 3, 4 belong to instance 0 and 5 to 1
+#: (5 is a low-energy scatter of the photon: stuff as a fragment, part of
+#: the photon as a particle).
+SUPERA_FRAGMENTS = ((13, 2), (22, 1), (2212, 5), (11, 3), (11, 4), (11, 5))
 _SUPERA_INSTANCE_OF = (0, 1, 2, 0, 0, 1)
 
 

@@ -117,9 +117,14 @@ motif is constant on every fragment but mixed on a third of the non-LE particles
 the interaction has no class yet. So: `segment_motif` + `instance_fragment`,
 `segment_pid` + `instance_particle`, class-agnostic `instance_interaction`.
 Low-energy scatters (94% of fragments, 83-88% of particles, 7% of the energy) are
-stuff by default, as in PILArNet: they keep their class and get -1 in
-`instance_fragment` / `instance_particle`, not in `instance_interaction`
-(`le_is_stuff=False` keeps them as instances).
+stuff by default, as in PILArNet, and each level takes its stuff from its own
+class (`_resolve.LEVELS`): -1 in `instance_fragment` where the motif is le, in
+`instance_particle` where the pid is le, never in `instance_interaction`. A
+Compton scatter of a shower electron is stuff as a fragment but still part of
+that electron, so "stuff <=> no instance" holds at both levels (masking the
+particle by motif broke it for 5.7% of points: class electron, no instance).
+`labels=('particle',)` is shorthand for that level's pair; `le_is_stuff=False`
+keeps every scatter an instance.
 Object-level targets (momentum, vertex, primary) are better read from the
 `particle` / `interaction` tables through `group` than broadcast to points.
 

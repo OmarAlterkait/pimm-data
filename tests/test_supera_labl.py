@@ -167,22 +167,68 @@ def test_misaligned_event_id_raises(built, tmp_path):
 
 
 def test_le_is_stuff(built):
-    """Low-energy points keep their class but are no fragment or particle
-    instance; they stay in their interaction."""
+    """Each level's stuff is its own class: -1 in instance_fragment where the
+    motif is le, in instance_particle where the pid is le; classes and
+    instance_interaction are untouched."""
     root, _, _, _, files = built
     kw = dict(data_root=root, files=files, labels='all',
               modalities=('step', 'hits'))
-    things = JAXTPCDataset(**kw).get_data(0)
-    every = JAXTPCDataset(le_is_stuff=False, **kw).get_data(0)
-    for on in ('step', 'hits'):
-        t, e = things[on], every[on]
-        le = e['segment_motif'][:, 0] == 4
-        assert le.any() and (~le & (e['instance_fragment'][:, 0] >= 0)).any()
-        for k in ('instance_fragment', 'instance_particle'):
-            assert (t[k][le] == -1).all()
-            np.testing.assert_array_equal(t[k][~le], e[k][~le])
-        for k in ('segment_motif', 'segment_pid', 'instance_interaction'):
-            np.testing.assert_array_equal(t[k], e[k])
+    things, every = JAXTPCDataset(**kw), JAXTPCDataset(le_is_stuff=False, **kw)
+    n_scatter = 0
+    for idx in range(len(things)):
+        for on in ('step', 'hits'):
+            t, e = things.get_data(idx)[on], every.get_data(idx)[on]
+            for k, cls in (('instance_fragment', 'segment_motif'),
+                           ('instance_particle', 'segment_pid')):
+                stuff = e[cls][:, 0] == (4 if cls == 'segment_motif' else 5)
+                assert stuff.any() and (~stuff & (e[k][:, 0] >= 0)).any()
+                assert (t[k][stuff] == -1).all()
+                np.testing.assert_array_equal(t[k][~stuff], e[k][~stuff])
+            for k in ('segment_motif', 'segment_pid', 'instance_interaction'):
+                np.testing.assert_array_equal(t[k], e[k])
+            # a low-energy scatter of the photon: no fragment, still the photon
+            m, p = e['segment_motif'][:, 0], e['segment_pid'][:, 0]
+            scatter = (m == 4) & (p >= 0) & (p != 5)
+            n_scatter += int(scatter.sum())
+            assert (t['instance_fragment'][scatter] == -1).all()
+            assert (t['instance_particle'][scatter] >= 0).all()
+    assert n_scatter
+
+
+def test_panoptic_levels_are_consistent(built):
+    """At every level: one class per instance, stuff <=> no instance, and
+    levels nest (fragment in one particle, particle in one interaction)."""
+    from pimm_data._resolve import LEVELS
+    root, _, _, _, files = built
+    for stuff_on in (True, False):
+        d = JAXTPCDataset(data_root=root, files=files, le_is_stuff=stuff_on,
+                          labels=tuple(LEVELS), modalities=('step', 'hits'))
+        for idx in range(len(d)):
+            for on in ('step', 'hits'):
+                s = {k: v[:, 0] for k, v in d.get_data(idx)[on].items()
+                     if k.startswith(('segment_', 'instance_'))}
+                for inst, cls, stuff in LEVELS.values():
+                    ids = s[inst]
+                    if cls is not None:
+                        for u in np.unique(ids[ids >= 0]):
+                            assert len(np.unique(s[cls][ids == u])) == 1
+                        if stuff_on:
+                            np.testing.assert_array_equal(
+                                s[cls] == stuff, (ids < 0) & (s[cls] >= 0))
+                for inner, outer in (('instance_fragment', 'instance_particle'),
+                                     ('instance_particle', 'instance_interaction')):
+                    ids = s[inner]
+                    for u in np.unique(ids[ids >= 0]):
+                        assert len(np.unique(s[outer][ids == u])) == 1
+
+
+def test_level_names_expand():
+    from pimm_data._resolve import expand
+    assert expand('particle') == ('segment_pid', 'instance_particle')
+    assert expand(('fragment', 'segment_motif', 'interaction')) == (
+        'segment_motif', 'instance_fragment', 'instance_interaction')
+    with pytest.raises(ValueError, match='neither a level'):
+        expand(('bogus',))
 
 
 def test_segment_pdg_is_the_instances_pdg(built):

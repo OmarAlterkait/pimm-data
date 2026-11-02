@@ -133,27 +133,59 @@ PRESETS = {
     },
 }
 
-#: Instance keys that low-energy scatters (motif ``le``) are not instances of
-#: when they are stuff: a fragment or particle of LE points is not an object.
-#: Interactions keep them (an LE scatter still belongs to its interaction).
-STUFF_INSTANCES = ('instance_fragment', 'instance_particle')
-_MOTIF_LE = MOTIF_NAMES.index('le')
+#: Panoptic levels, nested (a fragment is in one particle, a particle in one
+#: interaction): ``level -> (instance key, class key, stuff class)``. A level
+#: is a class per point and an id per object of a ``thing`` class; a point of
+#: the stuff class is no object at that level (-1). Each level takes its stuff
+#: from its OWN class, so "stuff <=> no instance" holds by construction: a
+#: low-energy scatter is stuff as a fragment (motif le) but, inside a shower
+#: electron, still part of that electron (pid electron). Interactions have no
+#: class; every point of one, low-energy or not, belongs to it. Motif is not a
+#: particle class (a particle's fragments can differ in motif); it stays a
+#: per-point target.
+LEVELS = {
+    'fragment': ('instance_fragment', 'segment_motif', MOTIF_NAMES.index('le')),
+    'particle': ('instance_particle', 'segment_pid', PID_NAMES.index('le')),
+    'interaction': ('instance_interaction', None, None),
+}
+_STUFF = {inst: (cls, stuff) for inst, cls, stuff in LEVELS.values()
+          if cls is not None}
+
+
+def expand(labels, preset='pilarnet'):
+    """Label keys for ``labels``: preset keys, or a level name for that
+    level's (class, instance) pair — ``'particle'`` is ``('segment_pid',
+    'instance_particle')``. ``'all'`` is every preset key."""
+    if labels == 'all':
+        return tuple(PRESETS[preset])
+    out = []
+    for name in ((labels,) if isinstance(labels, str) else labels):
+        if name in LEVELS:
+            inst, cls, _ = LEVELS[name]
+            out += [k for k in (cls, inst) if k is not None]
+        elif name in PRESETS[preset]:
+            out.append(name)
+        else:
+            raise ValueError(f"labels={labels!r}: {name!r} is neither a level "
+                             f"{list(LEVELS)} nor a key {list(PRESETS[preset])}.")
+    if not out:
+        raise ValueError(f"labels={labels!r}: empty.")
+    return tuple(dict.fromkeys(out))
 
 
 def resolve(data, on, keys, preset='pilarnet', momentum='start',
             le_is_stuff=True):
     """Write the preset's ``keys`` onto part ``on`` as ``(N, 1)`` (vertex
     ``(N, 3)``). NaN in a table (no visible step) becomes the fill. With
-    ``le_is_stuff``, points of low-energy scatters get -1 in
-    :data:`STUFF_INSTANCES` (they keep their class). A no-op on an event
-    without label tables."""
+    ``le_is_stuff``, an instance key of a :data:`LEVELS` level is -1 on the
+    points of that level's stuff class. A no-op on an event without label
+    tables."""
     if momentum not in ('start', 'first'):
         raise ValueError(f"momentum={momentum!r}: use 'start' or 'first'")
     if on not in data or 'particle' not in data or 'group' not in data[on]:
         return data
     add_vocabulary(data)
     sub = data[on]
-    le = None
     for out in keys:
         path, fill = PRESETS[preset][out]
         path = tuple(p.format(momentum=momentum) for p in path)
@@ -164,11 +196,10 @@ def resolve(data, on, keys, preset='pilarnet', momentum='start',
             v = np.nan_to_num(v, nan=fill).astype(np.float32)
         else:
             v = v.astype(np.int32)
-        if le_is_stuff and out in STUFF_INSTANCES:
-            if le is None:
-                le = follow(data, on, PRESETS[preset]['segment_motif'][0]) \
-                    == _MOTIF_LE
-            v[le] = -1
+        if le_is_stuff and out in _STUFF:
+            cls, stuff = _STUFF[out]
+            v[follow(data, on, PRESETS[preset][cls][0]).reshape(v.shape)
+              == stuff] = -1
         sub[out] = v if v.ndim == 2 else v[:, None]
         if out.startswith('instance_'):
             # a categorical id: collate compacts it per event and makes it

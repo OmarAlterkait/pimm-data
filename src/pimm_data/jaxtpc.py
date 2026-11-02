@@ -121,7 +121,10 @@ class JAXTPCDataset(ShardEventDataset):
     volume : int or None
         Load only this volume index. ``None`` = all volumes.
     labels : tuple[str], 'all' or None
-        Read ``labl`` and write these per-point labels on ``step``/``hits``,
+        Read ``labl`` and write these per-point labels on ``step``/``hits``.
+        A panoptic level name (``'fragment'``, ``'particle'``,
+        ``'interaction'``, see :data:`pimm_data._resolve.LEVELS`) stands for
+        that level's class and instance keys. Otherwise per-point keys,
         each ``(N, 1)`` (``vertex`` ``(N, 3)``), named as pimm's PILArNet
         heads read them: classes ``segment_motif`` (shower, track, michel,
         delta, le), ``segment_pid`` (photon, electron, muon, pion, proton,
@@ -134,9 +137,10 @@ class JAXTPCDataset(ShardEventDataset):
         (``group``, ``track``, ``particle``, ``interaction``) come with any
         of them. ``None``: no labl.
     le_is_stuff : bool
-        Low-energy scatters are stuff, as in PILArNet: their points keep
-        their class but get -1 in ``instance_fragment`` /
-        ``instance_particle`` (not in ``instance_interaction``).
+        Low-energy scatters are stuff, as in PILArNet, at each level by that
+        level's own class: -1 in ``instance_fragment`` where the motif is le,
+        in ``instance_particle`` where the pid is le; never in
+        ``instance_interaction``.
     momentum : str
         The per-point ``momentum`` is ``|p|`` of the instance at creation
         (``'start'``, PILArNet's meaning) or at its first visible step
@@ -195,14 +199,8 @@ class JAXTPCDataset(ShardEventDataset):
                 f"but modalities={self._modalities} does not include 'step'. "
                 "Add 'step' to modalities or set min_deposits=0.")
 
-        preset = _resolve.PRESETS['pilarnet']
         if labels is not None:
-            labels = tuple(preset) if labels == 'all' else (
-                (labels,) if isinstance(labels, str) else tuple(labels))
-            unknown = set(labels) - set(preset)
-            if unknown or not labels:
-                raise ValueError(f"labels={labels!r}: name any of "
-                                 f"{list(preset)}, or 'all'.")
+            labels = _resolve.expand(labels)
             if not {'step', 'hits'} & set(self._modalities):
                 raise ValueError(
                     "labels= labels step or hits points; modalities="
