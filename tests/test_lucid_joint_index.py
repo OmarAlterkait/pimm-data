@@ -64,7 +64,10 @@ def test_missing_event_group_gap_tolerant(tmp_path):
     with h5py.File(os.path.join(root, 'hits', 'wc_hits_0000.h5'), 'r+') as f:
         del f['event_002']
 
-    ds = LUCiDDataset(data_root=root, split='', modalities=_ALL)
+    with pytest.raises(ValueError, match='present in some modalities'):
+        LUCiDDataset(data_root=root, split='', modalities=_ALL)
+    ds = LUCiDDataset(data_root=root, split='', modalities=_ALL,
+                      allow_partial=True)
     assert len(ds) == 3                              # 002 gone, not crashed
     for r in _readers(ds):
         assert r.indices[0].tolist() == [0, 1, 3]    # gap-tolerant + intersected
@@ -80,14 +83,12 @@ def test_min_segments_without_step_raises(tmp_path):
                      min_segments=5)
 
 
-def test_strict_lengths_raises_on_cross_modality_drop(tmp_path):
+def test_a_filter_is_not_a_gap(tmp_path):
+    """An event the step filter drops is gone from every modality without
+    complaint: presence is compared before filtering."""
     root = make_lucid_sample(str(tmp_path), n_events=3)
     with h5py.File(os.path.join(root, 'step', 'wc_step_0000.h5'), 'r+') as f:
         f['event_001'].attrs['n_segments'] = 0
-    with pytest.raises(ValueError):
-        LUCiDDataset(data_root=root, split='', modalities=_ALL,
-                     min_segments=1, strict_lengths=True)
-    # Default (non-strict) warns and proceeds.
     ds = LUCiDDataset(data_root=root, split='', modalities=_ALL,
                       min_segments=1)
     assert len(ds) == 2

@@ -13,7 +13,7 @@ directly): the detector datasets never used a generic npy loader, cache, or
 test-time augmentation path.
 
 A subclass must, in ``__init__`` (before ``super().__init__``): set
-``_modalities`` / ``_max_len`` / ``_strict_lengths`` / ``_source_data_root``,
+``_modalities`` / ``_max_len`` / ``_allow_partial`` / ``_source_data_root``,
 create the ``{step,sensor,hits,labl}_reader`` attrs (None when absent), set
 ``_canonical_reader`` (the reader whose file names label events), and call
 ``self._build_joint_index(source_label, filter_label)``. It must also define
@@ -28,6 +28,7 @@ from torch.utils.data import Dataset
 
 from .transform import split_pipeline
 from ._joint_index import build_joint_index
+from ._provenance import collect_provenance
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +146,11 @@ class ShardEventDataset(Dataset):
         reader so a global idx maps to the SAME physics event in all
         modalities (Phase A / D42 — see :mod:`pimm_data._joint_index`)."""
         self._n_events = build_joint_index(
-            self._readers_named(), strict_lengths=self._strict_lengths,
+            self._readers_named(), allow_partial=self._allow_partial,
             source_label=source_label, filter_label=filter_label)
+        #: what wrote each modality (see pimm_data._provenance)
+        self.provenance = collect_provenance(self._readers_named(),
+                                             source_label)
 
     def get_data_list(self):
         """Event ids for this split.

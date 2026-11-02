@@ -28,9 +28,15 @@ Shards align by **identity**, ``(run, shard tag)`` — the tag is the trailing
 one modality (partial transfer, failed per-modality production job, a
 hand-deleted corrupt file): every later shard shifts by one, and because
 event numbers restart per shard the per-shard intersection stays large.
-Tag alignment instead drops the unmatched shard from every modality (warn,
-or raise under ``strict_lengths``). Sorted-glob position remains only as a
-fallback when tags are not unique within a modality.
+
+Missing or partial data is an error by default: a shard missing from a
+modality, a shard that does not open, an event present in some modalities
+and not others, or shard tags that do not identify shards. ``allow_partial``
+(reading a corpus mid-build) turns these into a warning and aligns on what
+every modality has. An event filter (``min_deposits`` / ``min_segments``)
+is not a gap: presence is compared before filtering, filters intersect
+after. Two modalities naming different ``event_id`` for the same event is
+corruption and always raises.
 """
 
 import logging
@@ -52,7 +58,14 @@ def _shard_key(reader, i):
     return (run, tag)
 
 
-def build_joint_index(named_readers, *, strict_lengths=False,
+def _complain(msg, allow_partial):
+    if not allow_partial:
+        raise ValueError(msg + " Pass allow_partial=True to read what every "
+                         "modality has.")
+    log.warning(msg)
+
+
+def build_joint_index(named_readers, *, allow_partial=False,
                       source_label='', filter_label=''):
     """Intersect present events across modalities; inject one shared index.
 
@@ -61,15 +74,16 @@ def build_joint_index(named_readers, *, strict_lengths=False,
     named_readers : list[tuple[str, reader]]
         ``(modality_name, reader)`` for every loaded modality. Each reader
         must expose ``h5_files``, ``indices`` (list of per-shard ``np.int64``
-        event-number arrays) and ``cumulative_lengths``.
-    strict_lengths : bool
-        If True, raise on any cross-modality shard-count or event mismatch
-        instead of warning and aligning on the intersection.
+        event-number arrays, after any filter) and ``cumulative_lengths``;
+        ``present`` (unfiltered) and ``unreadable`` when it has them.
+    allow_partial : bool
+        Warn instead of raising on missing or partial data (see the module
+        docstring) and align on the intersection.
     source_label : str
         Identifier for log/error messages (e.g. the dataset ``data_root``).
     filter_label : str
         Human description of any active event filter (e.g.
-        ``"min_deposits=5"``) for the mismatch message.
+        ``"min_deposits=5"``) for log messages.
 
     Returns
     -------
@@ -86,42 +100,36 @@ def build_joint_index(named_readers, *, strict_lengths=False,
     if not readers:
         return 0
 
+    bad = {n: [r.h5_files[i] for i in getattr(r, 'unreadable', ())]
+           for n, r in named_readers}
+    if any(bad.values()):
+        _complain(f"{source_label}: shards that do not open: "
+                  f"{ {n: b for n, b in bad.items() if b} }.", allow_partial)
+
     # Shards align by identity (run, tag), not glob position — a missing
     # middle shard in one modality must drop that shard everywhere, never
     # shift the pairing of every later shard.
     keys_per = {n: [_shard_key(r, i) for i in range(len(r.h5_files))]
                 for n, r in named_readers}
-    tags_unique = all(len(set(ks)) == len(ks) for ks in keys_per.values())
-
-    if tags_unique:
-        common = set.intersection(*(set(ks) for ks in keys_per.values()))
-        first_keys = keys_per[named_readers[0][0]]
-        order = [k for k in first_keys if k in common]
-        dropped = {n: [k for k in ks if k not in common]
-                   for n, ks in keys_per.items()}
-        if any(dropped.values()):
-            msg = (f"{source_label}: shard mismatch across modalities — "
-                   f"aligning on {len(order)} common shard(s) by (run, tag); "
-                   f"per-modality unmatched shards: "
-                   f"{ {n: d for n, d in dropped.items() if d} }.")
-            if strict_lengths:
-                raise ValueError(msg)
-            log.warning(msg)
-        sel = {n: [ks.index(k) for k in order] for n, ks in keys_per.items()}
-    else:
-        # Fallback: tags not unique within a modality (unexpected writer
-        # naming) — legacy positional alignment on the common prefix.
-        shard_counts = {n: len(r.h5_files) for n, r in named_readers}
-        n_files = min(shard_counts.values())
-        msg = (f"{source_label}: shard tags are not unique per modality "
-               f"— falling back to sorted-glob positional alignment"
-               + (f"; shard-count mismatch {shard_counts}, aligning on the "
-                  f"first {n_files} shard(s)."
-                  if len(set(shard_counts.values())) > 1 else "."))
-        if strict_lengths and len(set(shard_counts.values())) > 1:
-            raise ValueError(msg)
-        log.warning(msg)
-        sel = {n: list(range(n_files)) for n, _ in named_readers}
+    dup = {n: sorted({k for k in ks if ks.count(k) > 1})
+           for n, ks in keys_per.items()}
+    if any(dup.values()):
+        raise ValueError(
+            f"{source_label}: shard tags do not identify shards (the trailing "
+            f"filename token repeats within a modality): "
+            f"{ {n: d for n, d in dup.items() if d} }; shards cannot be "
+            f"paired across modalities.")
+    common = set.intersection(*(set(ks) for ks in keys_per.values()))
+    order = [k for k in keys_per[named_readers[0][0]] if k in common]
+    dropped = {n: [k for k in ks if k not in common]
+               for n, ks in keys_per.items()}
+    if any(dropped.values()):
+        _complain(f"{source_label}: shard mismatch across modalities — "
+                  f"{len(order)} common shard(s) by (run, tag); per-modality "
+                  f"unmatched shards: "
+                  f"{ {n: d for n, d in dropped.items() if d} }.",
+                  allow_partial)
+    sel = {n: [ks.index(k) for k in order] for n, ks in keys_per.items()}
 
     # Re-select each reader's shard list to the aligned sequence (identity
     # when nothing is missing — the common case).
@@ -130,13 +138,29 @@ def build_joint_index(named_readers, *, strict_lengths=False,
         if s != list(range(len(r.h5_files))):
             r.h5_files = [r.h5_files[i] for i in s]
             r.indices = [r.indices[i] for i in s]
+            if getattr(r, 'present', None) is not None:
+                r.present = [r.present[i] for i in s]
             runs = getattr(r, '_file_runs', None)
             if runs is not None:
                 r._file_runs = [runs[i] for i in s]
-    n_files = len(next(iter(sel.values())))
+    n_files = len(order)
 
-    raw_totals = {n: int(sum(len(r.indices[s]) for s in range(n_files)))
-                  for n, r in named_readers}
+    # Presence, before any filter, must agree shard by shard.
+    def present(r, s):
+        p = getattr(r, 'present', None)
+        return {int(e) for e in (p[s] if p is not None else r.indices[s])}
+    gaps = []
+    for s in range(n_files):
+        sets = {n: present(r, s) for n, r in named_readers}
+        union = set.union(*sets.values())
+        missing = {n: sorted(union - v)[:5] for n, v in sets.items()
+                   if union - v}
+        if missing:
+            gaps.append((os.path.basename(readers[0].h5_files[s]), missing))
+    if gaps:
+        _complain(f"{source_label}: events present in some modalities and "
+                  f"not others ({len(gaps)} shard(s); first: {gaps[:3]}).",
+                  allow_partial)
 
     joint = []
     for s in range(n_files):
@@ -144,24 +168,44 @@ def build_joint_index(named_readers, *, strict_lengths=False,
         for r in readers[1:]:
             common &= {int(e) for e in r.indices[s]}
         joint.append(np.array(sorted(common), dtype=np.int64))
+    _check_event_ids(named_readers, joint, source_label)
 
     cum = (np.cumsum([len(a) for a in joint]).astype(np.int64)
            if joint else np.zeros(0, dtype=np.int64))
     total = int(cum[-1]) if len(cum) else 0
-
-    # A4: surface any event dropped to keep modalities aligned. Expected under
-    # an step event filter; otherwise it flags a real cross-modality gap.
-    if any(t != total for t in raw_totals.values()):
-        extra = f" (or filtered by {filter_label})" if filter_label else ""
-        msg = (f"{source_label}: joint cross-modality index = {total} events; "
-               f"per-modality present counts {raw_totals}. Events not present "
-               f"in every loaded modality{extra} are excluded to keep all "
-               f"modalities aligned.")
-        if strict_lengths:
-            raise ValueError(msg)
-        log.warning(msg)
+    if filter_label:
+        log.info("%s: %d events jointly present after %s.", source_label,
+                 total, filter_label)
 
     for r in readers:
         r.indices = joint
         r.cumulative_lengths = cum
     return total
+
+
+def _check_event_ids(named_readers, joint, source_label):
+    """Every modality that records an ``event_id`` (format 2: ``/dprod`` or
+    entry attrs) must name the same one for each joint event."""
+    from ._shard_meta import read_shard_meta
+    for s, events in enumerate(joint):
+        if not len(events):
+            continue
+        ids = {}
+        for n, r in named_readers:
+            try:
+                v = read_shard_meta(r.h5_files[s]).get('event_ids')
+            except OSError:
+                continue
+            if v is not None and len(v) > events[-1]:
+                ids[n] = v[events]
+        names = list(ids)
+        for n in names[1:]:
+            a, b = ids[names[0]], ids[n]
+            diff = np.flatnonzero((a != b) & (a >= 0) & (b >= 0))
+            if len(diff):
+                e = int(events[diff[0]])
+                raise ValueError(
+                    f"{source_label}: shard {s} event {e}: {names[0]} has "
+                    f"event_id {int(ids[names[0]][diff[0]])}, {n} has "
+                    f"{int(ids[n][diff[0]])} ({len(diff)} such event(s)). "
+                    f"The modalities do not hold the same events.")

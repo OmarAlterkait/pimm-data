@@ -6,7 +6,7 @@ production job, hand-deleted corrupt file) shifts every later shard's
 pairing — and because event numbers restart per shard, the per-shard
 intersection stays large, silently pairing *different physics events*
 across modalities. Tag alignment drops the unmatched shard from every
-modality instead (warn; raise under strict_lengths).
+modality instead (raise; warn under allow_partial).
 """
 
 import glob
@@ -37,7 +37,8 @@ def _tags(reader):
 
 def test_middle_shard_gap_aligns_by_tag_not_position(gap_root, caplog):
     with caplog.at_level('WARNING'):
-        ds = JAXTPCDataset(gap_root, modalities=('step', 'sensor'))
+        ds = JAXTPCDataset(gap_root, modalities=('step', 'sensor'),
+                           allow_partial=True)
     # Both readers end on the SAME shard identity sequence: 0000, 0002.
     assert _tags(ds.step_reader) == ['0000.h5', '0002.h5']
     assert _tags(ds.sensor_reader) == ['0000.h5', '0002.h5']
@@ -59,8 +60,7 @@ def test_middle_shard_gap_aligns_by_tag_not_position(gap_root, caplog):
 
 def test_middle_shard_gap_strict_raises(gap_root):
     with pytest.raises(ValueError, match='unmatched'):
-        JAXTPCDataset(gap_root, modalities=('step', 'sensor'),
-                      strict_lengths=True)
+        JAXTPCDataset(gap_root, modalities=('step', 'sensor'))
 
 
 def test_no_gap_is_identity(tmp_path):
@@ -88,7 +88,7 @@ def test_multirun_gap_drops_only_that_run(tmp_path):
     os.remove(str(tmp_path / 'sensor' / 'run_b' / 'sim_sensor_0001.h5'))
 
     ds = JAXTPCDataset(str(tmp_path), runs=list(runs),
-                       modalities=('step', 'sensor'))
+                       modalities=('step', 'sensor'), allow_partial=True)
     assert len(ds) == (N_FILES + N_FILES - 1) * N_EVENTS
     # run_a intact, run_b missing 0001 — in BOTH readers.
     for r in (ds.step_reader, ds.sensor_reader):

@@ -145,6 +145,20 @@ for on step/hits (PILArNet names: `segment_motif|pid|pdg`,
 stuff by default (`le_is_stuff`). See docs/LABELS.md. LUCiD keeps `labl` as a modality that joins onto
 `step`/`hits`; `('labl',)` and `('sensor', 'labl')` are rejected there.
 
+### Missing data and provenance
+
+The joint index (`_joint_index.py`) pairs shards across modalities by
+`(run, trailing filename token)` and **raises by default** on missing or
+partial data: a shard absent from a modality, a shard that does not open, an
+event present in some modalities and not others, or tags that do not
+identify shards. `allow_partial=True` (a corpus mid-build) warns and aligns
+on the intersection instead. Event filters (`min_deposits`/`min_segments`)
+are not gaps: presence is compared before filtering (`reader.present`).
+Different `event_id`s for one event always raise. `dataset.provenance`
+(`_provenance.py`) reports what wrote each modality (JAXTPC git commit,
+`labl_format`, pysupera commit and input hashes); data from more than one
+`production_version` raises. The labl reader reads only `supera-labl/1`.
+
 ### Detector-specific quirks
 
 - **JAXTPC auto-detects readout type** (`wire` vs `pixel`) from the

@@ -81,7 +81,10 @@ def test_entry_gap_in_one_modality_is_dropped(roots, tmp_path):
     hits = os.path.join(gap, 'j000000', tasks[0], 'hits', f'sim_hits_{tasks[0]}.h5')
     with h5py.File(hits, 'a') as f:
         del f['entry_000001']
-    ds = JAXTPCDataset(data_root=gap, runs='j*/*', modalities=('step', 'hits'))
+    with pytest.raises(ValueError, match='present in some modalities'):
+        JAXTPCDataset(data_root=gap, runs='j*/*', modalities=('step', 'hits'))
+    ds = JAXTPCDataset(data_root=gap, runs='j*/*', modalities=('step', 'hits'),
+                       allow_partial=True)
     assert len(ds) == 2 * N_EVENTS - 1
     # entry 1 of the first task is skipped in BOTH modalities, and the
     # identity of what remains still comes from the files' event ids

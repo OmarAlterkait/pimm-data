@@ -74,7 +74,7 @@ class OpticalDataset(ShardEventDataset):
         loop=1,
         max_len=-1,
         ignore_index=-1,
-        strict_lengths=False,
+        allow_partial=False,
     ):
         self._modalities = tuple(modalities)
         self._validate_modalities(self._modalities)
@@ -85,7 +85,7 @@ class OpticalDataset(ShardEventDataset):
         self._dataset_name = dataset_name
         self._schema = schema
         self._max_len = max_len
-        self._strict_lengths = strict_lengths
+        self._allow_partial = allow_partial
         self._source_data_root = data_root
         self._source_split = split
 

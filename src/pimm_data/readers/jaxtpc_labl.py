@@ -15,6 +15,7 @@ is read whole, as nested tables::
 import h5py
 
 from .._shard_meta import read_shard_meta
+from ..supera_labl import LABL_FORMAT
 from ._base import ShardReaderBase
 
 
@@ -40,12 +41,13 @@ class JAXTPCLablReader(ShardReaderBase):
         self.split = split
         self.dataset_name = dataset_name
         self._init_shards()
-        fmt = str(read_shard_meta(self.h5_files[0])['config_attrs'].get(
-            'labl_format', ''))
-        if not fmt.startswith('supera-labl'):
-            raise ValueError(
-                f"{self.h5_files[0]}: not a labl file written by "
-                f"pimm_data.supera_labl (labl_format={fmt!r}).")
+        for path in self.h5_files:
+            fmt = str(read_shard_meta(path)['config_attrs'].get(
+                'labl_format', ''))
+            if fmt != LABL_FORMAT:
+                raise ValueError(
+                    f"{path}: labl_format={fmt!r}; this reader reads "
+                    f"{LABL_FORMAT!r} (pimm_data.supera_labl).")
 
     def read_event(self, idx):
         """The whole event, nested; nothing is cast or filtered (the tables

@@ -56,7 +56,8 @@ def test_gap_in_one_modality_realigns(tmp_path):
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
         del f['entry_000001']                       # present in step/hits/labl
 
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+                       labels='segment_motif', allow_partial=True)
     # Joint = intersection = {0, 2}; entry_000001 dropped from EVERY modality.
     assert len(ds) == 2
     for r in _readers(ds):
@@ -145,19 +146,41 @@ def test_min_deposits_is_volume_aware(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A4 — strict_lengths turns the alignment warning into an error.
+# Missing or partial data raises unless allow_partial; a filter is no gap.
 # ---------------------------------------------------------------------------
 
-def test_strict_lengths_raises_on_cross_modality_drop(tmp_path):
+def test_partial_data_raises_unless_allowed(tmp_path):
     root = make_jaxtpc_sample(str(tmp_path), n_events=3)
     with h5py.File(os.path.join(root, 'sensor', 'sim_sensor_0000.h5'), 'r+') as f:
         del f['entry_000001']
-    with pytest.raises(ValueError):
-        JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif',
-                      strict_lengths=True)
-    # Default (non-strict) just warns and proceeds.
-    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL, labels='segment_motif')
+    with pytest.raises(ValueError, match='allow_partial'):
+        JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+                      labels='segment_motif')
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+                       labels='segment_motif', allow_partial=True)
     assert len(ds) == 2
+
+
+def test_unreadable_shard_raises_unless_allowed(tmp_path):
+    root = make_jaxtpc_sample(str(tmp_path), n_events=3, n_files=2)
+    victim = os.path.join(root, 'hits', 'sim_hits_0001.h5')
+    os.remove(victim)
+    os.symlink(os.path.join(root, 'hits', 'vanished.h5'), victim)
+    with pytest.raises(ValueError, match='do not open'):
+        JAXTPCDataset(data_root=root, split='', modalities=('hits',))
+    assert len(JAXTPCDataset(data_root=root, split='', modalities=('hits',),
+                             allow_partial=True)) == 3
+
+
+def test_mismatched_event_ids_always_raise(tmp_path):
+    root = make_jaxtpc_sample(str(tmp_path), n_events=3)
+    with h5py.File(os.path.join(root, 'hits', 'sim_hits_0000.h5'), 'r+') as f:
+        f['entry_000002'].attrs['event_id'] = 99
+        f['dprod/events/event_id'][2] = 99
+    for partial in (False, True):
+        with pytest.raises(ValueError, match='event_id'):
+            JAXTPCDataset(data_root=root, split='',
+                          modalities=('step', 'hits'), allow_partial=partial)
 
 
 def test_subclass_readers_are_aligned(tmp_path):
@@ -172,7 +195,7 @@ def test_subclass_readers_are_aligned(tmp_path):
         VALID_MODALITIES = ('coeff',)
 
         def __init__(self):
-            self._strict_lengths = False
+            self._allow_partial = False
             self.coeff_reader = JAXTPCStepReader(
                 data_root=os.path.join(root, 'step'), split='',
                 dataset_name='sim')
@@ -192,3 +215,30 @@ def test_subclass_readers_are_aligned(tmp_path):
     r.h5py_worker_init()
     r._locate_event(0)
     assert r._meta_by_path == {'subclass': 'state'}
+
+
+# ---------------------------------------------------------------------------
+# Provenance: what wrote each modality; one production per dataset.
+# ---------------------------------------------------------------------------
+
+def test_provenance_is_exposed_and_one_production(tmp_path):
+    root = make_jaxtpc_sample(str(tmp_path), n_events=2)
+    ds = JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+                       labels='segment_motif')
+    assert set(ds.provenance) == {'step', 'sensor', 'hits', 'labl'}
+    assert ds.provenance['labl']['labl_format'] == 'supera-labl/1'
+    assert 'git_commit' in ds.provenance['sensor']
+    with h5py.File(os.path.join(root, 'hits', 'sim_hits_0000.h5'), 'r+') as f:
+        f['config'].attrs['production_version'] = 'another_campaign'
+    with pytest.raises(ValueError, match='more than one production'):
+        JAXTPCDataset(data_root=root, split='', modalities=_ALL,
+                      labels='segment_motif')
+
+
+def test_unknown_labl_format_is_refused(tmp_path):
+    root = make_jaxtpc_sample(str(tmp_path), n_events=2)
+    with h5py.File(os.path.join(root, 'labl', 'sim_labl_0000.h5'), 'r+') as f:
+        f['config'].attrs['labl_format'] = 'supera-labl/2'
+    with pytest.raises(ValueError, match='labl_format'):
+        JAXTPCDataset(data_root=root, split='', modalities=('step',),
+                      labels='segment_motif')

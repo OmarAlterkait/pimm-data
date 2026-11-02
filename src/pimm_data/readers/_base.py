@@ -112,16 +112,24 @@ class ShardReaderBase:
         return read_shard_meta(h5_path)["present_events"]
 
     def _build_index(self):
+        """Per shard: ``indices`` (present events after any filter),
+        ``present`` (present events, unfiltered — what the joint index
+        compares across modalities) and ``unreadable`` (shard positions that
+        failed to open; they index no events, and a dataset refuses them
+        unless ``allow_partial``)."""
         self.cumulative_lengths = []
-        self.indices = []
-        for h5_path in self.h5_files:
+        self.indices, self.present, self.unreadable = [], [], []
+        for i, h5_path in enumerate(self.h5_files):
             try:
+                present = read_shard_meta(h5_path)["present_events"]
                 index = self._index_for_shard(h5_path)
             except Exception as e:
                 log.warning("Error processing %s: %s", h5_path, e)
-                index = np.array([], dtype=np.int64)
+                present = index = np.array([], dtype=np.int64)
+                self.unreadable.append(i)
             self.cumulative_lengths.append(len(index))
             self.indices.append(index)
+            self.present.append(present)
         self.cumulative_lengths = np.cumsum(self.cumulative_lengths)
         log.info("%s: %d events from %d files", type(self).__name__,
                  int(self.cumulative_lengths[-1])

@@ -147,6 +147,11 @@ class JAXTPCDataset(ShardEventDataset):
         (``'first'``).
     min_deposits : int
         Minimum 3D deposits per event (step reader filter).
+    allow_partial : bool
+        Missing or partial data raises by default: a shard absent from a
+        loaded modality, a shard that does not open, an event present in
+        some modalities and not others. True warns and reads what every
+        modality has (a corpus mid-build). Event filters are never gaps.
     include_physics : bool
         Whether step reader loads dx, theta, phi, charge, photons, etc.
     transform : list or None
@@ -176,7 +181,7 @@ class JAXTPCDataset(ShardEventDataset):
         loop=1,
         max_len=-1,
         ignore_index=-1,
-        strict_lengths=False,
+        allow_partial=False,
         cache=False,
         num_time_steps=None,
         n_wires_per_plane=None,
@@ -219,7 +224,7 @@ class JAXTPCDataset(ShardEventDataset):
         self._min_deposits = min_deposits
         self._include_physics = include_physics
         self._max_len = max_len
-        self._strict_lengths = strict_lengths
+        self._allow_partial = allow_partial
         self._source_data_root = data_root
         # B2 runs=: multi-run selection in ONE dataset. A list/tuple names
         # runs verbatim; a string is a glob expanded once (sorted) against
