@@ -31,14 +31,20 @@ def test_precollate_bare_callable():
 
 
 def test_postcollate_bare_callable_in_compose():
-    """A bare user fn(batch)->batch runs post-collate via the ORDINARY Compose —
-    no runner, no seeds plumbing. ToDevice is just another transform in the list."""
+    """A user fn(batch)->batch runs after Collect once it says scope='batch';
+    ToDevice is just another transform in the list. Undeclared, it is
+    refused there (it would otherwise be a per-event transform run on the
+    whole batch)."""
     def gpu_scale(batch):
         batch['feat'] = batch['feat'] * 2
         return batch
 
+    with pytest.raises(ValueError, match="scope='sample'"):
+        Compose([dict(type='ToDevice', device='cpu'), gpu_scale], stage='batch')
+    gpu_scale.scope = 'batch'
     batch = {'feat': torch.ones(4, 2), 'offset': torch.tensor([4]), 'name': ['e0']}
-    out = Compose([dict(type='ToDevice', device='cpu'), gpu_scale])(batch)
+    out = Compose([dict(type='ToDevice', device='cpu'), gpu_scale],
+                  stage='batch')(batch)
     assert out['feat'].device == torch.device('cpu')
     assert torch.equal(out['feat'], torch.full((4, 2), 2.0))
 

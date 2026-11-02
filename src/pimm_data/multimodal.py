@@ -32,7 +32,7 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from .builder import DATASETS, build_dataset
-from .transform import Compose
+from .transform import split_pipeline
 from ._shard_meta import read_shard_meta
 
 log = logging.getLogger(__name__)
@@ -126,13 +126,8 @@ class MultiModalEventDataset(Dataset):
         self._max_events_per_source = int(max_events_per_source)
         self._min_points = int(min_points)
         self._mixture = mixture or {}
-        # the same split as every dataset: per-event head (... Collect) runs in
-        # the workers, the post-collate tail (ToDevice, Densify, ...) is
-        # batch_transform, for the trainer to run on the batch
-        from ._dataset_base import ShardEventDataset
-        head, tail = ShardEventDataset._split_at_collect(transform)
-        self.transform = Compose(head)
-        self.batch_transform = Compose(tail) if tail else None
+        # the same split as every dataset (see ShardEventDataset)
+        self.transform, self.batch_transform = split_pipeline(transform)
         self.loop = int(loop)
         self.ignore_index = ignore_index
         self.test_mode = False

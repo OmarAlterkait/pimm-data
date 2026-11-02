@@ -5,9 +5,7 @@ Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 """
 
-import random
 from collections.abc import Mapping, Sequence
-import numpy as np
 import torch
 from torch.utils.data.dataloader import default_collate
 
@@ -91,7 +89,7 @@ def mix_pairs(batch):
               and isinstance(batch[k], torch.Tensor)]
     if events:
         raise ValueError(f"mix: event-level keys {events} cannot follow two "
-                         f"events merged into one; drop them or mix_prob=0.")
+                         f"events merged into one; drop them or the Mix3D.")
     out = dict(batch)
     for k, v in batch.items():
         if (k == 'offset' or k.endswith('_offset')) \
@@ -100,13 +98,12 @@ def mix_pairs(batch):
     return out
 
 
-def collate_fn(batch, mix_prob=0):
+def collate_fn(batch):
     """
     collate function for point cloud which support dict and list,
     'coord' is necessary to determine 'offset'
 
-    ``mix_prob``: with this probability, a role-collated batch (from
-    ``Collect``) is mixed — see :func:`mix_pairs`.
+    Mixing is not collate's job: ``Mix3D`` after ``Collect`` does it.
     """
     if not isinstance(batch, Sequence):
         raise TypeError(f"{batch.dtype} is not supported.")
@@ -118,13 +115,7 @@ def collate_fn(batch, mix_prob=0):
     # commented as "legacy"; making it raise showed 13 tests reach it, so the
     # label was wrong in the direction that invites deletion.
     if isinstance(batch[0], Mapping) and '_roles' in batch[0]:
-        out = collate_with_roles(batch)
-        if mix_prob and random.random() < mix_prob:
-            out = mix_pairs(out)
-        return out
-    if mix_prob:
-        raise ValueError("collate_fn: mix_prob needs a Collect-ed batch (with "
-                         "_roles); point_collate_fn mixes the bare layout.")
+        return collate_with_roles(batch)
 
     if isinstance(batch[0], torch.Tensor):
         return torch.cat(list(batch))
@@ -156,35 +147,7 @@ def collate_fn(batch, mix_prob=0):
         return default_collate(batch)
 
 
-def point_collate_fn(batch, mix_prob=0):
-    assert isinstance(
-        batch[0], Mapping
-    )  # currently, only support input_dict, rather than input_list
-    batch = collate_fn(batch)
-    if random.random() < mix_prob:
-        if "instance" in batch.keys():
-            offset = batch["offset"]
-            start = 0
-            num_instance = 0
-            for i in range(len(offset)):
-                if i % 2 == 0:
-                    num_instance = max(batch["instance"][start : offset[i]])
-                if i % 2 != 0:
-                    mask = batch["instance"][start : offset[i]] != -1
-                    batch["instance"][start : offset[i]] += num_instance * mask
-                start = offset[i]
-        if "offset" in batch.keys():
-            batch["offset"] = torch.cat(
-                [batch["offset"][1:-1:2], batch["offset"][-1].unsqueeze(0)], dim=0
-            )
-    return batch
-
-
-def gaussian_kernel(dist2: np.array, a: float = 1, c: float = 5):
-    return a * np.exp(-dist2 / (2 * c**2))
-
-
-def inseg_collate_fn(batch, mix_prob=0):
+def inseg_collate_fn(batch):
     """
     Collate function for instance segmentation that handles lists of data dictionaries.
     Each item in the batch is a list of data dictionaries (one per query).
@@ -202,4 +165,4 @@ def inseg_collate_fn(batch, mix_prob=0):
         flattened_batch.extend(item_list)
     
     # Use the original collate function on the flattened batch
-    return collate_fn(flattened_batch, mix_prob=mix_prob)
+    return collate_fn(flattened_batch)

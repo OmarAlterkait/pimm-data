@@ -26,7 +26,7 @@ import logging
 
 from torch.utils.data import Dataset
 
-from .transform import Compose
+from .transform import split_pipeline
 from ._joint_index import build_joint_index
 
 log = logging.getLogger(__name__)
@@ -45,15 +45,10 @@ class ShardEventDataset(Dataset):
         super().__init__()
         self.data_root = data_root
         self.split = split
-        # map -> reduce -> map: one transform list, split at the terminal Collect.
-        # The head (... Collect) runs per-event in workers (self.transform). The
-        # tail (post-Collect: ToDevice/Densify/AddNoise/Digitize) runs per-BATCH
-        # after collate (self.batch_transform) — a trainer calls it post-collate
-        # (e.g. on_after_batch_transfer). No separate cpu/gpu transform argument;
-        # ToDevice in the tail is the device step. None when there's no tail.
-        head, tail = self._split_at_collect(transform)
-        self.transform = Compose(head)
-        self.batch_transform = Compose(tail) if tail else None
+        # one transform list, cut after the terminal Collect: the head runs
+        # per event in the workers, the tail (batch_transform) on each
+        # collated batch — EventLoader runs it
+        self.transform, self.batch_transform = split_pipeline(transform)
         self.ignore_index = ignore_index
         self.loop = loop
         # Detector datasets have no test-time-augmentation path; kept as a
@@ -64,30 +59,6 @@ class ShardEventDataset(Dataset):
             "Totally %d x %d samples in %s %s set.",
             len(self.data_list), self.loop,
             os.path.basename(self.data_root), split)
-
-    @staticmethod
-    def _split_at_collect(transform):
-        """Split the pipeline at the terminal ``Collect`` (the reduce boundary):
-        head = ``[…, Collect]`` (per-event), tail = ``[post-Collect]`` (per-batch).
-
-        Accepts ``Collect`` as a ``dict(type='Collect', …)`` or an instance. No
-        ``Collect`` (or none given) → everything is the per-event head.
-        """
-        if not transform:
-            return transform, None
-        from .transform import Collect
-        specs = list(transform)
-
-        def _is_collect(t):
-            if isinstance(t, dict):
-                return t.get('type') == 'Collect'
-            return isinstance(t, Collect)
-
-        idxs = [i for i, t in enumerate(specs) if _is_collect(t)]
-        if not idxs:
-            return specs, None
-        cut = idxs[-1] + 1               # terminal Collect ends the per-event head
-        return specs[:cut], specs[cut:]
 
     # -- Dataset surface ---------------------------------------------------
 

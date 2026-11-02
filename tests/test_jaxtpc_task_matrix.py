@@ -101,11 +101,11 @@ def test_pid_is_constant_on_particles_motif_on_fragments(jaxtpc_data_root):
 
 
 def test_mix_merges_pairs_by_roles(jaxtpc_data_root):
-    """collate_fn(mix_prob) on a Collect-ed batch merges events 2i, 2i+1 by
+    """Mix3D on a Collect-ed batch merges events 2i, 2i+1 by
     offsets alone; instance ids are label-role, so the pair never shares
     one, -1 stays -1, and the group refs still point into the merged table."""
     import torch
-    from pimm_data import collate_fn
+    from pimm_data import Mix3D, collate_fn
     lab = ('segment_motif', 'instance_fragment', 'instance_particle')
     ds = make_ds(jaxtpc_data_root, ('step', 'hits'), labels=lab, transform=[
         dict(type='Collect', parts={
@@ -114,7 +114,7 @@ def test_mix_merges_pairs_by_roles(jaxtpc_data_root):
         })])
     ev = [ds[i] for i in range(2)]
     plain = collate_fn(ev)
-    mixed = collate_fn(ev, mix_prob=1.0)
+    mixed = Mix3D(prob=1.0)(collate_fn(ev))
     assert mixed['step_offset'].tolist() == [len(plain['step_coord'])]
     assert mixed['group_offset'].tolist() == [len(plain['group_volume'])]
     n0 = int(plain['step_offset'][0])
@@ -131,10 +131,10 @@ def test_mix_merges_pairs_by_roles(jaxtpc_data_root):
 def test_bare_collect_batches_like_the_namespaced_form(jaxtpc_data_root):
     """Collect(part=) (bare keys, pimm's configs) carries roles too: instance
     ids are compacted and batch-unique, and mixing merges pairs; only a
-    pipeline that never Collects refuses mix_prob."""
+    pipeline that never Collects refuses Mix3D."""
     import pytest as _pt
     import torch
-    from pimm_data import collate_fn
+    from pimm_data import Mix3D, collate_fn
     lab = ('segment_motif', 'instance_particle')
     tf = [dict(type='Collect', part='step', keys=('coord',) + lab,
                feat_keys=('coord', 'energy'))]
@@ -144,13 +144,14 @@ def test_bare_collect_batches_like_the_namespaced_form(jaxtpc_data_root):
                                                  feat_keys=('coord', 'energy'))})])
     ev_b, ev_n = [bare[i] for i in range(2)], [ns[i] for i in range(2)]
     for mix in (0, 1.0):
-        b, n = collate_fn(ev_b, mix_prob=mix), collate_fn(ev_n, mix_prob=mix)
+        m = Mix3D(prob=mix)
+        b, n = m(collate_fn(ev_b)), m(collate_fn(ev_n))
         assert torch.equal(b['offset'], n['step_offset'])
         for k in ('coord', 'feat') + lab:
             assert torch.equal(b[k], n[f'step_{k}']), (k, mix)
     raw = make_ds(jaxtpc_data_root, ('step',))
-    with _pt.raises(ValueError, match='mix_prob'):
-        collate_fn([dict(raw[0]['step']), dict(raw[1]['step'])], mix_prob=1.0)
+    with _pt.raises(ValueError, match='_roles'):
+        Mix3D(prob=1.0)(collate_fn([dict(raw[0]['step']), dict(raw[1]['step'])]))
 
 
 def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):

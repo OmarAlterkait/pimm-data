@@ -548,7 +548,7 @@ class Densify:
         Sub-dict key to write. Default ``'dense'``.
     """
 
-    scope = 'sample'  # per-event independent; placeable pre- OR post-collate
+    scope = 'any'  # a per-event sub-dict or a collated batch (dispatches)
 
     def __init__(self, geom=None, *, modality=None, fill=0.0, dtype='float32',
                  on_pixel='raise', require_shape=True, dense_key='dense',
@@ -571,8 +571,7 @@ class Densify:
     def __call__(self, data):
         # DISPATCH: a post-collate collated batch carries the flat
         # ``<mod>_offset`` key (added by Collect/collate); a per-event sensor
-        # sub-dict never does. Same op (scatter COO -> grid), scope='sample'
-        # either way; place it after ToDevice for the on-GPU path.
+        # sub-dict never does. Same op (scatter COO -> grid), scope='any'; place it after ToDevice for the on-GPU path.
         pfx = f'{self.modality}_' if self.modality is not None else ''
         if (pfx + self.offset_key) in data:
             return self._densify_batch(data)

@@ -16,10 +16,10 @@ except ImportError:
 # Registries + build function
 from ._registry import Registry, build_from_cfg
 from .builder import DATASETS, build_dataset
-from .transform import Compose, TRANSFORMS
+from .transform import Compose, TRANSFORMS, split_pipeline
 
 # Collate utilities
-from .collate import collate_fn, point_collate_fn, inseg_collate_fn
+from .collate import collate_fn, inseg_collate_fn
 
 # Dataset classes (register themselves)
 from .jaxtpc import JAXTPCDataset
@@ -60,12 +60,13 @@ from .geometry import load_plane_registry, dataset_geometry_kwargs
 # Flat-prefixed batch boundary helpers (REDESIGN)
 from .batch_ops import to_batched_coords, split_event
 
-# Post-collate, on-device batch transforms (the dense GPU path runner)
+# Transforms on the collated batch (the tail after Collect)
 from . import dense_ops  # noqa: F401
 from . import dense_ops_jax  # noqa: F401  (going to dense, jax path)
 from .batch_transforms import (
-    move_to_device, content_seed, ToDevice, BatchTransformMixin,
+    move_to_device, content_seed, Mix3D, ToDevice, BatchTransformMixin,
 )
+from .loader import EventLoader, seed_worker
 
 __all__ = [
     "Registry",
@@ -75,7 +76,6 @@ __all__ = [
     "Compose",
     "TRANSFORMS",
     "collate_fn",
-    "point_collate_fn",
     "inseg_collate_fn",
     "JAXTPCDataset",
     "LUCiDDataset",
@@ -94,9 +94,12 @@ __all__ = [
     "OpticalSensorReader",
     "OpticalEastWestReader",
     "build_joint_index",
-    # post-collate dense transforms (run via Compose; no batch-transform runner)
+    # the tail after Collect, and the loader that runs it
+    "EventLoader",
+    "seed_worker",
     "move_to_device",
     "content_seed",
+    "Mix3D",
     "ToDevice",
     "BatchTransformMixin",
     "load_plane_registry",

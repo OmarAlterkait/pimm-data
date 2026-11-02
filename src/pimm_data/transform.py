@@ -1421,15 +1421,22 @@ class Compose(object):
 
     Dict and callable entries may be mixed in the same list.
 
-    A transform declares its ``scope`` (default ``'sample'``): ``'sample'`` sees
-    one event and is a pre-collate ``map``; ``'batch'`` needs the collated set
-    (offset, cross-event) and is post-collate only. ``Compose`` is the pre-collate
-    site, so a ``scope='batch'`` entry is rejected here — place it in the
-    post-collate stage list (see :mod:`pimm_data.batch_transforms`) instead.
+    A transform declares its ``scope`` (default ``'sample'``): ``'sample'``
+    sees one event (before collate), ``'batch'`` needs the collated batch
+    (offsets, several events, the device: ``ToDevice``, ``Mix3D``), ``'any'``
+    dispatches on its input and runs at either (``Densify``). ``stage`` is
+    where this ``Compose`` runs, ``'sample'`` or ``'batch'``, and an entry
+    whose scope cannot run there is rejected when it is built. A plain
+    callable after ``Collect`` must say ``scope = 'batch'`` (or ``'any'``).
     """
 
-    def __init__(self, cfg=None):
+    STAGES = ('sample', 'batch')
+
+    def __init__(self, cfg=None, stage='sample'):
+        if stage not in self.STAGES:
+            raise ValueError(f"Compose: stage={stage!r}, use {self.STAGES}")
         self.cfg = cfg if cfg is not None else []
+        self.stage = stage
         self.transforms = []
         for t_cfg in self.cfg:
             if isinstance(t_cfg, dict):
@@ -1440,16 +1447,39 @@ class Compose(object):
                 raise TypeError(
                     "Compose entries must be dict (registry config) or callable, "
                     f"got {type(t_cfg).__name__}")
-            # fence: a scope='batch' transform reads the collated set; it cannot
-            # run per-event in the worker. Catch the misplacement at build time.
-            if getattr(t, 'scope', 'sample') == 'batch':
+            scope = getattr(t, 'scope', 'sample')
+            if scope not in ('sample', 'batch', 'any'):
+                raise ValueError(f"{type(t).__name__}: scope={scope!r}, use "
+                                 "'sample', 'batch' or 'any'")
+            if scope == 'batch' and stage == 'sample':
                 raise ValueError(
-                    f"{type(t).__name__} is scope='batch' (needs the collated "
-                    "set) and cannot run pre-collate in Compose; place it in the "
-                    "post-collate stage list (apply_batch_transforms).")
+                    f"{type(t).__name__} is scope='batch' (it needs the "
+                    "collated batch) and cannot run per event; place it after "
+                    "the terminal Collect.")
+            if scope == 'sample' and stage == 'batch':
+                raise ValueError(
+                    f"{type(t).__name__} is scope='sample' (one event) and "
+                    "cannot run on the collated batch; place it before the "
+                    "terminal Collect, or give it scope='batch' / 'any'.")
             self.transforms.append(t)
 
     def __call__(self, data_dict):
         for t in self.transforms:
             data_dict = t(data_dict)
         return data_dict
+
+
+def split_pipeline(transform):
+    """One transform list -> ``(head, tail)``, cut after the terminal
+    ``Collect``: ``head`` runs per event in the DataLoader workers,
+    ``tail`` (None when nothing follows ``Collect``) on each collated batch
+    in the main process — :class:`pimm_data.loader.EventLoader` runs it.
+    Without a ``Collect`` everything is the head. Each part is checked for
+    entries that cannot run there (see :class:`Compose`)."""
+    specs = list(transform or [])
+    idxs = [i for i, t in enumerate(specs)
+            if (t.get('type') == 'Collect' if isinstance(t, dict)
+                else isinstance(t, Collect))]
+    cut = idxs[-1] + 1 if idxs else len(specs)
+    head, tail = specs[:cut], specs[cut:]
+    return Compose(head), (Compose(tail, stage='batch') if tail else None)

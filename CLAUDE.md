@@ -96,17 +96,23 @@ READ). The old `stream=` is gone.
 ### Dense path (post-collate tail, map → reduce → map)
 
 A single `transform` list is **split at the terminal `Collect`** by
-`ShardEventDataset._split_at_collect`: the head (`…, Collect`) is
-`dataset.transform` (runs per-event in DataLoader workers, sparse — only
-sparse crosses PCIe); the tail (everything after `Collect`) is
-`dataset.batch_transform`, which a trainer runs **per-batch after collate**
-(e.g. Lightning `on_after_batch_transfer`). `ToDevice(device=…)` opens the
-tail (the device step); then `Densify` (a single dispatching torch
-transform — the `Batch*` variants were deleted) builds the per-plane grids
-**on-device**. It takes `geom=` (a config-derived plane registry via
+`transform.split_pipeline` (every dataset, PILArNet and the multi-source
+wrapper included): the head (`…, Collect`) is `dataset.transform` (runs
+per-event in DataLoader workers, sparse — only sparse crosses PCIe); the tail
+(everything after `Collect`) is `dataset.batch_transform`, run **per batch
+after collate in the main process** by `loader.EventLoader` (a DataLoader
+that applies it and stamps `_epoch`/`_rank`; Lightning:
+`BatchTransformMixin`). A loop over a bare DataLoader skips the tail, so
+consumers build `EventLoader`. Each transform has a `scope`: `'sample'`
+(default, one event), `'batch'` (`Mix3D`, `ToDevice`), `'any'` (`Densify`,
+helix's `AddNoise`/`Digitize`, which dispatch); `Compose(stage=)` refuses an
+entry on the wrong side of `Collect` when the dataset is built. `Mix3D` is a
+tail entry (train pipeline, before `ToDevice`), not a collate argument.
+`ToDevice(device=…)` is the device step; then `Densify` builds the per-plane
+grids **on-device**. It takes `geom=` (a config-derived plane registry via
 `geometry.load_plane_registry`, since real shards lack `n_wires` attrs) and
-`modality='sensor'`, runs `scope='sample'`, and dispatches numpy (per-event
-sub-dict) vs torch (collated batch) on whether `<part>_offset` is present.
+`modality='sensor'`, and dispatches numpy (per-event sub-dict) vs torch
+(collated batch) on whether `<part>_offset` is present.
 Recipe: `configs/jaxtpc/sensor_dense_gpu.py`.
 
 **GOING TO DENSE STAYS HERE; THE FORWARD MODEL LEFT.** `AddNoise`, `Digitize`,
@@ -175,14 +181,14 @@ stuff by default (`le_is_stuff`). See docs/LABELS.md. LUCiD keeps `labl` as a mo
 
 `tests/conftest.py` provides session-scoped fixtures
 (`jaxtpc_data_root`, `lucid_data_root`, `jaxtpc_pixel_data_root`) that
-build synthetic v3 datasets via `pimm_data.testing` unless the matching
+build synthetic format-2 datasets via `pimm_data.testing` unless the matching
 `*_DATA_ROOT` env var points at real shards. Tests that only make sense
 on production data should use `@pytest.mark.real_data_only` — they
 auto-skip when both env vars are unset (collection-time skip, see
 `pytest_collection_modifyitems`).
 
 `pimm_data.testing` regenerates a minimal but cross-modality-consistent
-v3 fixture from pure numpy + h5py. Cross-modality invariants (e.g.
+format-2 fixture from pure numpy + h5py. Cross-modality invariants (e.g.
 `hits.deposit_to_group` indexes `hits.group_to_track`; JAXTPC `labl` is made by
 running `supera_labl.write_labl` on a synthetic pysupera file)
 are encoded there; preserve them when changing reader behaviour.

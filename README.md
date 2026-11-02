@@ -347,13 +347,15 @@ makes them unique across the batch (-1 stays -1). Both `Collect` forms carry
 roles (the single-part form is one unprefixed part), so batching is the same
 for either.
 
-**Mixing (Mix3D).** `collate_fn(batch, mix_prob=p)` merges events `2i` and `2i+1`
+**Mixing (Mix3D).** `dict(type='Mix3D', prob=p)` after `Collect` (train pipeline
+only, before `ToDevice`) merges events `2i` and `2i+1`
 of a `Collect`-ed batch (either form) by their offsets alone, so it works for any keys a
 pipeline collects. It is correct because of roles: ids that must stay apart are
 `('label', …)` or `('ref', part)` and are batch-unique after collate. A pipeline
 that collects its own ids declares them in `Collect(..., roles=...)`; an id left
 `point`-role would collide. Event-level tensors are refused (a merged pair has no
-single value), and `mix_prob` on a batch without roles raises.
+single value), and a batch without roles raises. Nothing is summed or densified:
+a mixed sparse readout carries both events' rows.
 If a task needs uniform instance convention, remap in a transform.
 
 **Segment**:
@@ -582,7 +584,6 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 # batch['sensor_offset'] = chunks/event, batch['sensor_wave_offset'] = samples/event
 ```
 
-`point_collate_fn` adds mix-up augmentation.
 `inseg_collate_fn` flattens instance-segmentation query batches.
 
 ### Performance tips
@@ -700,7 +701,8 @@ src/pimm_data/
     detector_transforms.py  Apply, MultiCrop, AggregateSensorHits,
                             SetupGraph/BuildNexus/Align, PDGToSemantic, RemapSegment
     batch_ops.py       to_batched_coords, split_event (boundary helpers)
-    collate.py         collate_fn, point_collate_fn, inseg_collate_fn
+    collate.py         collate_fn, inseg_collate_fn, mix_pairs
+    loader.py          EventLoader (DataLoader + the tail after Collect)
     builder.py         DATASETS, build_dataset
     utils/pdg.py       pdg_to_semantic(pdg, scheme)
 configs/               campaign data-loader recipes (see docs/CAMPAIGN.md)

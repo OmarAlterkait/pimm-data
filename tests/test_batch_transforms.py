@@ -94,7 +94,7 @@ def test_densify_rejects_float_indices():
 
 def test_todevice_only_is_move_no_dense(jaxtpc_data_root):
     _, batch = _sensor_batch(jaxtpc_data_root, B=2)
-    out = Compose([dict(type='ToDevice', device='cpu')])(deepcopy(batch))
+    out = Compose([dict(type='ToDevice', device='cpu')], stage='batch')(deepcopy(batch))
     assert 'dense' not in out
     assert torch.equal(out['wire'], batch['wire'])
 

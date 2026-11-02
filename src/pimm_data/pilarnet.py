@@ -14,7 +14,7 @@ import logging
 from torch.utils.data import Dataset
 from typing import Literal
 from .builder import DATASETS
-from .transform import Compose, TRANSFORMS
+from .transform import Compose, TRANSFORMS, split_pipeline
 
 _log = logging.getLogger(__name__)
 
@@ -82,7 +82,8 @@ class PILArNetH5Dataset(Dataset):
             self.data_root = os.environ.get(f"PILARNET_DATA_ROOT_{revision.upper()}")
             assert self.data_root is not None, f"PILARNET_DATA_ROOT_V1/V2 is not set; checked {f'PILARNET_DATA_ROOT_{revision.upper()}'}"
         self.split = split
-        self.transform = Compose(transform)
+        # the same split as every dataset (see ShardEventDataset)
+        self.transform, self.batch_transform = split_pipeline(transform)
         self.test_mode = test_mode
         self.test_cfg = test_cfg if test_mode else None
         self.loop = loop if not test_mode else 1
