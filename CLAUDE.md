@@ -113,7 +113,7 @@ grids **on-device**. It takes `geom=` (a config-derived plane registry via
 `geometry.load_plane_registry`, since real shards lack `n_wires` attrs) and
 `modality='sensor'`, and dispatches numpy (per-event sub-dict) vs torch
 (collated batch) on whether `<part>_offset` is present.
-Recipe: `configs/jaxtpc/sensor_dense_gpu.py`.
+Example: `tests/test_loader.py::test_loader_applies_the_tail`; helix builds its GPU tail with `helix.data.transforms.build_sensor_gpu_stages`.
 
 **GOING TO DENSE STAYS HERE; THE FORWARD MODEL LEFT.** `AddNoise`, `Digitize`,
 `noise.py`, `noise_jax.py` and the coherent-noise oracle are helix's now

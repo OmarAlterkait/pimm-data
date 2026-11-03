@@ -50,7 +50,7 @@ Every challenge is `Dataset(modalities=…, labels=…) → transforms → Colle
 | 3D self-supervised (SSL) | `('step',)` | — | `MultiCrop` (global/local) | `global`/`local`: coord/origin_coord/feat | `configs/jaxtpc/ssl_step.py` | recipe ✓ |
 | Interaction grouping | `('step',)` | `('instance_interaction',)` | `GridSample` | `step`: coord/instance_interaction | — | planned |
 | Raw-readout SSL | `('sensor',)` | — | `MultiCrop` (no geom aug — index space) | `global`/`local`: coord/feat | `configs/jaxtpc/ssl_sensor.py` | recipe ✓ |
-| Sensor dense (densify + noise on GPU) | `('sensor',)` | — | ONE transform list, split at `Collect`: worker Collects sparse COO; post-collate tail (`ToDevice`→`Densify`→`AddNoise`→`Digitize`) = `dataset.batch_transform`, run on GPU | `sensor`: wire/time/value/plane_gid → `sensor_dense {gid:(B,W,T)}` | `configs/jaxtpc/sensor_dense_gpu.py` | recipe ✓ |
+| Sensor dense (densify + noise on GPU) | `('sensor',)` | — | ONE transform list, split at `Collect`: worker Collects sparse COO; post-collate tail (`ToDevice`→`Densify`→`AddNoise`→`Digitize`) = `dataset.batch_transform`, run on GPU | `sensor`: wire/time/value/plane_gid → `sensor_dense {gid:(B,W,T)}` | `tests/test_loader.py` (helix: `build_sensor_gpu_stages`) | ✓ |
 | Panoptic on hits (2D) | `('hits',)` | as for step | `GridSample` | `hits`: coord + those keys | — | planned |
 | step <-> hits matching | `('step','hits')` | — | per-modality `Apply` | `step`/`hits`: coord/group, `step`: qs, `group` part | — | planned |
 | sensor → step inverse problem | `('step','sensor')` | optional, on step | per-modality `Apply` | `sensor` in, `step` target | — | planned |
