@@ -112,4 +112,4 @@ __all__ = [
     "read_shard_meta",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
