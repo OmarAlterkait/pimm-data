@@ -123,6 +123,11 @@ class ShardReaderBase:
             try:
                 present = read_shard_meta(h5_path)["present_events"]
                 index = self._index_for_shard(h5_path)
+                # A subclass may number events in its own id space (helix's
+                # coeff/cells readers: identity hashes); then the shard
+                # metadata is not its presence, and its index is.
+                if not np.isin(index, present).all():
+                    present = index
             except Exception as e:
                 log.warning("Error processing %s: %s", h5_path, e)
                 present = index = np.array([], dtype=np.int64)

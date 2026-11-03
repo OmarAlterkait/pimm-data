@@ -183,6 +183,22 @@ def test_mismatched_event_ids_always_raise(tmp_path):
                           modalities=('step', 'hits'), allow_partial=partial)
 
 
+def test_readers_in_their_own_id_space_are_checked(tmp_path, monkeypatch):
+    """A reader that numbers events itself (helix's coeff/cells: identity
+    hashes) is compared on its own ids, and modalities that hold none of
+    the same events raise, partial or not."""
+    from pimm_data.readers.jaxtpc_hits import JAXTPCHitsReader
+    root = make_jaxtpc_sample(str(tmp_path), n_events=3)
+    base = JAXTPCHitsReader._index_for_shard
+    monkeypatch.setattr(JAXTPCHitsReader, '_index_for_shard',
+                        lambda self, p: base(self, p) + 1000)
+    with pytest.raises(ValueError, match='allow_partial'):
+        JAXTPCDataset(data_root=root, split='', modalities=('step', 'hits'))
+    with pytest.raises(ValueError, match='no event is present'):
+        JAXTPCDataset(data_root=root, split='', modalities=('step', 'hits'),
+                      allow_partial=True)
+
+
 def test_subclass_readers_are_aligned(tmp_path):
     """A dataset with its own modalities (helix's coeff datasets) gets its
     readers into the joint index: they come from VALID_MODALITIES, not a

@@ -173,6 +173,12 @@ def build_joint_index(named_readers, *, allow_partial=False,
     cum = (np.cumsum([len(a) for a in joint]).astype(np.int64)
            if joint else np.zeros(0, dtype=np.int64))
     total = int(cum[-1]) if len(cum) else 0
+    if total == 0 and any(len(e) for _, r in named_readers for e in r.indices):
+        # nothing pairs at all: never a partial read
+        counts = {n: int(sum(len(e) for e in r.indices)) for n, r in named_readers}
+        raise ValueError(
+            f"{source_label}: no event is present in every modality "
+            f"(events per modality: {counts}).")
     if filter_label:
         log.info("%s: %d events jointly present after %s.", source_label,
                  total, filter_label)
