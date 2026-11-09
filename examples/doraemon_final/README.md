@@ -1,8 +1,9 @@
 # Loading the doraemon final layout
 
-The layout the models read, as built for `doraemon_2026_1M_lartpc`. The 10k-event sample,
-10 tasks with no empty volumes, is at
-`/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/final_10k`:
+The layout the models read, as built for `doraemon_2026_1M_lartpc`. The sample holds 100,000
+events: 100 tasks with no empty volumes, about 1.1 TB wire and 1.5 TB pixel. It is at
+`/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/final_10k` (the directory keeps its first
+name):
 
 ```
 <data_root>/jaxtpc_{wire,pixel}/<bucket>/jaxtpc_{ro}_<task>/
@@ -29,7 +30,7 @@ So:
 `site_doraemon.py` hard-codes the sample's location
 (`/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/final_10k`; override with
 `DORAEMON_FINAL_ROOT`). Its `dataset(readout, modalities, labels, split)` returns a
-`JAXTPCDataset`, split by task (last task val).
+`JAXTPCDataset`, split by task (the last 5 tasks are val).
 
 ```bash
 bash examples/doraemon_final/run_examples.sh wire      # or pixel: every example below

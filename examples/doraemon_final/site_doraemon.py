@@ -3,9 +3,10 @@
     from site_doraemon import dataset, TASKS
     ds = dataset('wire', modalities=('step',), labels=('pysupera',), split='train')
 
-ROOT holds jaxtpc_{wire,pixel}/j000000/jaxtpc_{ro}_<task>/{step,hits,sensor,labl} for the
-first 10 tasks (10,000 events) of doraemon_2026_1M_lartpc. Split by task: the last task is
-val, the rest train. Override the location with DORAEMON_FINAL_ROOT.
+ROOT holds jaxtpc_{wire,pixel}/j000000/jaxtpc_{ro}_<task>/{step,hits,sensor,labl} for 100
+tasks (100,000 events) of doraemon_2026_1M_lartpc: the first 100 of bucket j000000 with no
+empty volume. Split by task: the last N_VAL tasks are val, the rest train. Override the
+location with DORAEMON_FINAL_ROOT. (The directory keeps its first name, final_10k.)
 """
 import os
 
@@ -15,6 +16,7 @@ ROOT = os.environ.get('DORAEMON_FINAL_ROOT',
                       '/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/final_10k')
 BUCKET = 'j000000'
 READOUTS = ('wire', 'pixel')
+N_VAL = 5                                  # tasks (1,000 events each) held out for val
 
 
 def tasks(readout='wire'):
@@ -33,7 +35,7 @@ TASKS = {ro: tasks(ro) for ro in READOUTS if os.path.isdir(os.path.join(ROOT, f'
 
 def runs(readout='wire', split='all'):
     t = TASKS[readout]
-    t = {'train': t[:-1], 'val': t[-1:], 'all': t}[split]
+    t = {'train': t[:-N_VAL], 'val': t[-N_VAL:], 'all': t}[split]
     return [f'{BUCKET}/{x}' for x in t]
 
 
