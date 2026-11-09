@@ -22,6 +22,9 @@ from _format2_helpers import ID_BASE, N_EVENTS, _to_tasks
 TASK = 'jaxtpc_wire_j000000-000004'
 FRAGMENTS = SUPERA_FRAGMENTS
 EXPECT_MOTIF = {2: 1, 1: 0, 5: 4, 3: 3, 4: 2}
+# the five per-point labels ('all') plus the broadcast object keys
+EVERY = ('segment_motif', 'segment_pid', 'instance_fragment', 'instance_particle',
+         'instance_interaction', 'segment_pdg', 'is_primary', 'momentum', 'vertex')
 
 
 @pytest.fixture(scope='module')
@@ -91,7 +94,7 @@ def test_merge_counts_kinematics_and_parent_pdg(built):
 
 def test_dataset_labels_match_supera(built):
     root, supera, hits, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
+    ds = JAXTPCDataset(data_root=root, files=files, labels=EVERY,
                        modalities=('step', 'hits'), le_is_stuff=False)
     assert len(ds) == N_EVENTS
     with h5py.File(supera) as su, \
@@ -263,7 +266,7 @@ def test_level_names_expand():
 
 def test_segment_pdg_is_the_instances_pdg(built):
     root, _, _, _, files = built
-    ds = JAXTPCDataset(data_root=root, files=files, labels='all',
+    ds = JAXTPCDataset(data_root=root, files=files, labels=EVERY,
                        modalities=('step',), le_is_stuff=False)
     s = ds.get_data(0)['step']
     inst = s['instance_particle'][:, 0]
@@ -279,7 +282,7 @@ def test_keys_stay_aligned_through_sampling_and_collate(built):
     keys = ('segment_motif', 'segment_pid', 'instance_particle',
             'instance_interaction', 'is_primary', 'momentum', 'vertex')
     ds = JAXTPCDataset(
-        data_root=root, files=files, labels='all', modalities=('step',),
+        data_root=root, files=files, labels=EVERY, modalities=('step',),
         transform=[
             dict(type='Apply', on='step', transforms=[
                 dict(type='GridSample', grid_size=200.0, hash_type='fnv',

@@ -148,10 +148,15 @@ particle: labl columns            fragment/instance/fragment_instance/parent/
 interaction: labl columns
 ```
 
-`JAXTPCDataset(labels=...)` reads `labl` and writes the per-point labels it names,
-under the PILArNet keys pimm's heads read: classes `segment_motif`, `segment_pid`,
-`segment_pdg`; ids `instance_fragment`, `instance_particle`, `instance_interaction`;
-`is_primary`, `momentum`, `vertex`. None of them is "the" target: `Collect` picks.
+`JAXTPCDataset(labels=...)` reads `labl` and writes the keys it names, under the
+PILArNet names pimm's heads read. The per-point labels, everything pysupera says about
+a point, are five: classes `segment_motif`, `segment_pid`; ids `instance_fragment`,
+`instance_particle`, `instance_interaction` (`labels='all'`). `segment_pdg`,
+`is_primary`, `momentum` and `vertex` are properties of a particle or an interaction,
+not of a point: their values are the `particle` / `interaction` table columns, reached
+from any point through its instance id. They are broadcast to points only when named
+(pimm's instance loss reads `momentum` per point and averages it back per instance).
+None of them is "the" target: `Collect` picks.
 Each is a lookup over every point, so a pipeline asks only for what it uses (1M
 wire: all nine cost about 1 s of `get_data`, one or two about 0.25 s).
 

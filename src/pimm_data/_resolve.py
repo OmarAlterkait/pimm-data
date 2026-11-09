@@ -143,6 +143,15 @@ _FRAG = ('_fragment',)
 #: names are the PILArNet keys pimm's heads and evaluators read; classes are
 #: ``segment_*``, ids ``instance_*`` (rows of ``particle``, or of
 #: ``interaction`` for ``instance_interaction``).
+#:
+#: Only the first five are per-point labels (a class or an instance per point:
+#: the panoptic information pysupera gives). The last four are properties of a
+#: particle or an interaction, broadcast to its points: the objects' own values
+#: are table columns (``particle.pdg``, ``is_primary``, ``momentum_start`` /
+#: ``momentum_first``; ``interaction.vertex``), reached from any point through
+#: its instance id. They stay requestable by name for losses that read them per
+#: point (pimm's instance loss averages ``momentum`` back per instance), but
+#: ``'all'`` is the five labels (:data:`POINT_LABELS`).
 PRESETS = {
     'pilarnet': {
         'segment_motif': (_FRAG + ('motif',), -1),
@@ -156,6 +165,8 @@ PRESETS = {
         'vertex': (_INST + ('interaction', 'vertex'), -1.0),
     },
 }
+POINT_LABELS = ('segment_motif', 'segment_pid', 'instance_fragment',
+                'instance_particle', 'instance_interaction')
 
 #: Panoptic levels, nested (a fragment is in one particle, a particle in one
 #: interaction): ``level -> (instance key, class key, stuff class)``. A level
@@ -190,9 +201,11 @@ def expand(labels, preset='pilarnet'):
     """Label keys for ``labels``: preset keys, or a level name for that
     level's (class, instance) pair — ``'pysupera'`` (pysupera's panoptic
     target) is ``('segment_motif', 'instance_particle')``, ``'particle'`` is
-    ``('segment_pid', 'instance_particle')``. ``'all'`` is every preset key."""
+    ``('segment_pid', 'instance_particle')``. ``'all'`` is the five per-point
+    labels (:data:`POINT_LABELS`); the broadcast object keys (``segment_pdg``,
+    ``is_primary``, ``momentum``, ``vertex``) only when named."""
     if labels == 'all':
-        return tuple(PRESETS[preset])
+        return tuple(k for k in POINT_LABELS if k in PRESETS[preset])
     out = []
     for name in ((labels,) if isinstance(labels, str) else labels):
         if name in LEVELS:

@@ -80,12 +80,19 @@ def test_labels_are_exactly_what_is_asked(jaxtpc_data_root):
     for on in ('step', 'hits'):
         assert {k for k in one[on] if k.startswith(('segment', 'instance'))} \
             == {'segment_pid'}
-        assert {'segment_motif', 'segment_pid', 'segment_pdg',
-                'instance_fragment', 'instance_particle',
-                'instance_interaction', 'is_primary', 'momentum',
-                'vertex'} <= set(every[on])
+        # 'all' is the five per-point labels; the broadcast object keys only
+        # when named
+        assert {k for k in every[on] if k.startswith(('segment', 'instance'))
+                or k in ('is_primary', 'momentum', 'vertex')} == {
+            'segment_motif', 'segment_pid', 'instance_fragment',
+            'instance_particle', 'instance_interaction'}
         # a label does not depend on which others were asked for
         assert (one[on]['segment_pid'] == every[on]['segment_pid']).all()
+    obj = make_ds(jaxtpc_data_root, ('step', 'hits'),
+                  labels=('segment_pdg', 'is_primary', 'momentum',
+                          'vertex')).get_data(0)
+    for on in ('step', 'hits'):
+        assert {'segment_pdg', 'is_primary', 'momentum', 'vertex'} <= set(obj[on])
 
 
 def test_pid_is_constant_on_particles_motif_on_fragments(jaxtpc_data_root):

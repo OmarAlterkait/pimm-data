@@ -103,9 +103,11 @@ batch = next(iter(loader))
 > `split=''`.
 
 > **`labels=`** reads `labl`. JAXTPC: name the per-point labels wanted —
-> classes `segment_motif`, `segment_pid`, `segment_pdg`; ids `instance_fragment`,
-> `instance_particle`, `instance_interaction`; `is_primary`, `momentum`, `vertex`
-> (or `'all'`) — the PILArNet key names; `Collect` picks the training target.
+> classes `segment_motif`, `segment_pid`; ids `instance_fragment`,
+> `instance_particle`, `instance_interaction` (`'all'` is these five), or a level
+> (`'pysupera'`, `'fragment'`, `'particle'`, `'interaction'`). Object properties
+> (`segment_pdg`, `is_primary`, `momentum`, `vertex`) are `particle` / `interaction`
+> table columns, broadcast to points only when named. `Collect` picks the target.
 > LUCiD: `labels=True` attaches `segment`/`instance`. See docs/LABELS.md.
 
 ---

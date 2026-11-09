@@ -125,14 +125,16 @@ class JAXTPCDataset(ShardEventDataset):
         A panoptic level name (``'pysupera'`` — pysupera's own target, the
         reference —, ``'fragment'``, ``'particle'``, ``'interaction'``, see
         :data:`pimm_data._resolve.LEVELS`) stands for
-        that level's class and instance keys. Otherwise per-point keys,
-        each ``(N, 1)`` (``vertex`` ``(N, 3)``), named as pimm's PILArNet
-        heads read them: classes ``segment_motif`` (shower, track, michel,
-        delta, le), ``segment_pid`` (photon, electron, muon, pion, proton,
-        le), ``segment_pdg`` (raw); ids ``instance_fragment``,
-        ``instance_particle`` (rows of ``particle``),
-        ``instance_interaction`` (rows of ``interaction``); and
-        ``is_primary``, ``momentum``, ``vertex``. Which one is a training
+        that level's class and instance keys. Otherwise keys, each
+        ``(N, 1)``, named as pimm's PILArNet heads read them. The per-point
+        labels (``'all'``): classes ``segment_motif`` (shower, track,
+        michel, delta, le), ``segment_pid`` (photon, electron, muon, pion,
+        proton, le); ids ``instance_fragment``, ``instance_particle`` (rows
+        of ``particle``), ``instance_interaction`` (rows of
+        ``interaction``). Object properties broadcast to points, only when
+        named (their own values are ``particle`` / ``interaction`` table
+        columns): ``segment_pdg``, ``is_primary``, ``momentum``, ``vertex``
+        (``(N, 3)``). Which one is a training
         target is the pipeline's choice (``Collect`` keys). Each is a lookup
         over every point, so ask only for what is used. The tables
         (``group``, ``track``, ``particle``, ``interaction``) come with any
