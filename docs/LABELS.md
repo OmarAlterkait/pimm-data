@@ -155,18 +155,26 @@ under the PILArNet keys pimm's heads read: classes `segment_motif`, `segment_pid
 Each is a lookup over every point, so a pipeline asks only for what it uses (1M
 wire: all nine cost about 1 s of `get_data`, one or two about 0.25 s).
 
-Panoptic pairs follow the levels a class belongs to (5 real events, wire and pixel):
-motif is constant on every fragment but mixed on a third of the non-LE particles
-(a muon's track, deltas and Michel); PID is constant on fragments and particles;
-the interaction has no class yet. So: `segment_motif` + `instance_fragment`,
-`segment_pid` + `instance_particle`, class-agnostic `instance_interaction`.
+**pysupera is the reference.** Its own panoptic target (`torchdata`) is the instance's
+semantic type (le on the instance's LE fragments) with the instance: in pimm-data
+`segment_motif` + `instance_particle`, the level `labels=('pysupera',)`. Motif is
+constant on every instance and every fragment, and PID on every fragment and
+instance (1M, 50 events per readout, after e48d395; an earlier "motif mixed on a
+third of particles" was the motif bug, which read the instance's type on the
+fragment's own row). `tests/test_pysupera_golden.py` compares every label with
+pysupera's own output on real data. The other levels are views of the same
+hierarchy: `segment_motif` + `instance_fragment`, `segment_pid` +
+`instance_particle`, class-agnostic `instance_interaction`.
 Low-energy scatters (94% of fragments, 83-88% of particles, 7% of the energy) are
 stuff by default, as in PILArNet, and each level takes its stuff from its own
 class (`_resolve.LEVELS`): -1 in `instance_fragment` where the motif is le, in
 `instance_particle` where the pid is le, never in `instance_interaction`. A
 Compton scatter of a shower electron is stuff as a fragment but still part of
-that electron, so "stuff <=> no instance" holds at both levels (masking the
-particle by motif broke it for 5.7% of points: class electron, no instance).
+that electron, so "stuff <=> no instance" holds at both levels. A point's PID is
+le exactly when its motif is, so the `pysupera` level's stuff is the particle
+level's. LE input differs from pysupera's default: pysupera drops LE points from
+its input (`include_le=False`); pimm-data keeps them as input with class le, no
+instance with `le_is_stuff`, their host's without (pysupera's `include_le=True`).
 `labels=('particle',)` is shorthand for that level's pair; `le_is_stuff=False`
 keeps every scatter an instance.
 Object-level targets (momentum, vertex, primary) are better read from the
@@ -355,8 +363,8 @@ On 1M task 0 (20 events per readout), the per-hit labels `JAXTPCDataset` builds 
 `labl` + hits were compared with pysupera's own `hit_labels`:
 
 - **wire:** 0 mismatches over 6.46M hits;
-- **pixel:** 16 fragment / 2 instance / 4 LE mismatches over 11.9M on-sensor hits,
-  all in the majority-resolved straddling groups.
+- **pixel:** 0 with labl's per-hit overrides (without them: about 15 fragment /
+  2 instance / 4 LE per event, all in groups pysupera splits; 50 events, 286M hits).
 
 Hits and step carry the JAXTPC group id as `group` (a reference into the `group`
 table), and `instance` becomes the particle row.

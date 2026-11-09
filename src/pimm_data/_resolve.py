@@ -166,22 +166,31 @@ PRESETS = {
 #: (pysupera's convention), so with ``le_is_stuff`` it has no fragment and no
 #: particle id; without it, it keeps its host's, as pysupera's ``include_le``
 #: does. Interactions have no class; every point of one, low-energy or not,
-#: belongs to it. Motif is not a
-#: particle class (a particle's fragments can differ in motif); it stays a
-#: per-point target.
+#: belongs to it.
+#:
+#: ``'pysupera'`` is pysupera's own panoptic target (its ``torchdata``): the
+#: instance's semantic type (le on the instance's LE fragments) with the
+#: instance. pysupera is the reference, so this is the pairing to use; motif is
+#: constant on every instance (0 mixed on 1M, 50 events per readout). Its stuff
+#: mask is the particle level's: a point's PID is le exactly when its motif is
+#: (no non-LE fragment sits in an LE instance), checked on real data by
+#: ``tests/test_pysupera_golden.py``.
 LEVELS = {
+    'pysupera': ('instance_particle', 'segment_motif', MOTIF_NAMES.index('le')),
     'fragment': ('instance_fragment', 'segment_motif', MOTIF_NAMES.index('le')),
     'particle': ('instance_particle', 'segment_pid', PID_NAMES.index('le')),
     'interaction': ('instance_interaction', None, None),
 }
-_STUFF = {inst: (cls, stuff) for inst, cls, stuff in LEVELS.values()
-          if cls is not None}
+# one stuff mask per instance key; 'pysupera' shares the particle level's
+_STUFF = {inst: (cls, stuff) for name, (inst, cls, stuff) in LEVELS.items()
+          if cls is not None and name != 'pysupera'}
 
 
 def expand(labels, preset='pilarnet'):
     """Label keys for ``labels``: preset keys, or a level name for that
-    level's (class, instance) pair — ``'particle'`` is ``('segment_pid',
-    'instance_particle')``. ``'all'`` is every preset key."""
+    level's (class, instance) pair — ``'pysupera'`` (pysupera's panoptic
+    target) is ``('segment_motif', 'instance_particle')``, ``'particle'`` is
+    ``('segment_pid', 'instance_particle')``. ``'all'`` is every preset key."""
     if labels == 'all':
         return tuple(PRESETS[preset])
     out = []

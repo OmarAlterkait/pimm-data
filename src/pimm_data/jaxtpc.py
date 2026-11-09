@@ -122,8 +122,9 @@ class JAXTPCDataset(ShardEventDataset):
         Load only this volume index. ``None`` = all volumes.
     labels : tuple[str], 'all' or None
         Read ``labl`` and write these per-point labels on ``step``/``hits``.
-        A panoptic level name (``'fragment'``, ``'particle'``,
-        ``'interaction'``, see :data:`pimm_data._resolve.LEVELS`) stands for
+        A panoptic level name (``'pysupera'`` — pysupera's own target, the
+        reference —, ``'fragment'``, ``'particle'``, ``'interaction'``, see
+        :data:`pimm_data._resolve.LEVELS`) stands for
         that level's class and instance keys. Otherwise per-point keys,
         each ``(N, 1)`` (``vertex`` ``(N, 3)``), named as pimm's PILArNet
         heads read them: classes ``segment_motif`` (shower, track, michel,

@@ -535,10 +535,11 @@ transform=[
 ]
 ```
 
-The panoptic pairs: `segment_motif` + `instance_fragment`, `segment_pid` +
-`instance_particle`; `instance_interaction` is class-agnostic. A model that
-reads the bare `segment`/`instance` gets them with
-`dict(type='Copy', keys_dict={'segment_pid': 'segment', 'instance_particle': 'instance'})`.
+pysupera is the reference. Its panoptic target is `segment_motif` +
+`instance_particle` (`labels=('pysupera',)`); the other pairs are `segment_motif` +
+`instance_fragment`, `segment_pid` + `instance_particle`; `instance_interaction` is
+class-agnostic. A model that reads the bare `segment`/`instance` gets pysupera's with
+`dict(type='Copy', keys_dict={'segment_motif': 'segment', 'instance_particle': 'instance'})`.
 
 Ready-to-run data-loader recipes for many challenges live in `configs/`
 (see `docs/CAMPAIGN.md`).
