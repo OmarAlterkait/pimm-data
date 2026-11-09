@@ -20,8 +20,10 @@ unprefixed keys::
                  'readout_type': 'wire'|'pixel',
                  'raw': {plane_label: {'wire'|'py'+'pz', 'time', 'value'}}},
       'hits':   {'coord': (E,D), 'energy': (E,1), 'plane_id': (E,1),
-                 'group': (E,), 'readout_type': 'wire'|'pixel'},
-      'group':  {'volume': (G,), ...},  # hits loaded, or labels
+                 'group': (E,)          # volume-numbered hits, or plane-local + labl
+                 | 'plane_group': (E,), # plane-local hits without labl (no ref)
+                 'readout_type': 'wire'|'pixel'},
+      'group':  {'volume': (G,), ...},  # step or hits groups, or labels
       # labels= only (docs/LABELS.md):
       'track': {...}, 'particle': {...}, 'interaction': {...},
       'name': str, 'split': str,
@@ -534,7 +536,13 @@ class JAXTPCDataset(ShardEventDataset):
             d = per_vol.get(v)
             if d is None:
                 if supera is not None:
-                    return None     # labl decides which volumes exist
+                    # labl decides which volumes exist; a volume with groups
+                    # that labl lacks would load silently unlabelled
+                    if n and (self._volume is None or v == self._volume):
+                        raise ValueError(
+                            f"volume {v}: {n} groups in {what} but labl has "
+                            "no such volume — the files are not the same event/task")
+                    return None
                 d = per_vol[v] = dict(n=n)
             elif d['n'] != n:
                 raise ValueError(
@@ -543,8 +551,16 @@ class JAXTPCDataset(ShardEventDataset):
             return d
 
         if supera is not None:
+            n_part = len(supera.get('particle', {}).get('parent', ()))
             for k, vd in supera.items():
                 if k.startswith('v'):
+                    g2t_, gf_ = vd['group_to_track'], vd['group_fragment']
+                    if len(gf_) != len(g2t_):
+                        raise ValueError(f"labl {k}: group_fragment has {len(gf_)} "
+                                         f"groups, group_to_track {len(g2t_)}")
+                    if len(gf_) and (np.min(gf_) < -1 or np.max(gf_) >= n_part):
+                        raise ValueError(f"labl {k}: group_fragment outside the "
+                                         f"{n_part} particle rows")
                     per_vol[int(k[1:])] = dict(
                         n=len(vd['group_to_track']),
                         track=vd['group_to_track'],
@@ -624,6 +640,8 @@ class JAXTPCDataset(ShardEventDataset):
             # pysupera's own owner of the group (-1: pysupera left it unowned)
             trk = supera['track']
             tid = np.asarray(trk['id'], np.int64)
+            if len(tid) > 1 and not (np.diff(tid) > 0).all():
+                raise ValueError("labl track/id is not sorted and unique")
             g2t = cat('track', np.int64)
             row = np.full(len(g2t), -1, np.int32)
             if len(tid):
@@ -659,6 +677,10 @@ class JAXTPCDataset(ShardEventDataset):
                     raise ValueError(
                         f"volume {v}: {len(d2g)} deposit_to_group entries, "
                         f"{int(mask.sum())} step deposits")
+                if len(d2g) and (np.min(d2g) < -1 or np.max(d2g) >= per_vol[v]['n']):
+                    raise ValueError(
+                        f"volume {v}: deposit_to_group outside its "
+                        f"{per_vol[v]['n']} groups")
                 ref[mask] = np.where(d2g >= 0, d2g + base[v], -1)
                 if per_vol[v].get('inw') is not None:
                     inw[mask] = per_vol[v]['inw']
@@ -711,12 +733,27 @@ class JAXTPCDataset(ShardEventDataset):
                                 f"{plane}: hits group ids are plane-local but "
                                 "labl has no plane_<P>/group map for this plane")
                         m = np.asarray(m, np.int64)
+                        ng = hits_raw.get(f'n_groups_plane:{plane}')
+                        if ng is not None and len(m) != ng:
+                            raise ValueError(
+                                f"{plane}: labl's plane map has {len(m)} groups, "
+                                f"the hits plane {ng}")
+                        if len(m) and (m.min() < 0 or m.max() >= per_vol[v]['n']):
+                            raise ValueError(
+                                f"{plane}: labl's plane map points outside volume "
+                                f"{v}'s {per_vol[v]['n']} groups")
                         if len(gid) and (gid.max() >= len(m) or gid.min() < 0):
                             raise ValueError(
                                 f"{plane}: plane group id out of range of labl's "
                                 f"map ({len(m)} groups)")
                         mapped.append(m[gid])
                     hits_gid = mapped
+            elif supera is not None and any(
+                    'group' in c for d in per_vol.values()
+                    for c in d.get('planes', {}).values()):
+                raise ValueError(
+                    "labl has plane_<P>/group maps (plane-local hits) but the "
+                    "hits file's group_id_space is 'volume' — not the same layout")
             if hits_gid is not None:
                 refs = []
                 for plane, gid in zip(h['planes'], hits_gid):
@@ -738,6 +775,14 @@ class JAXTPCDataset(ShardEventDataset):
                             raise ValueError(f"{plane}: labl on_sensor has "
                                              f"{len(c['on_sensor'])} hits, "
                                              f"hits {len(gid)}")
+                        if 'override_index' in c:
+                            oi = np.asarray(c['override_index'])
+                            if not (len(oi) == len(c.get('override_fragment', ()))
+                                    == len(c.get('override_instance', ()))) or (
+                                    len(oi) and (oi.min() < 0 or oi.max() >= len(gid))):
+                                raise ValueError(
+                                    f"{plane}: labl overrides inconsistent with the "
+                                    f"plane's {len(gid)} hits")
                         fix.append((o, len(gid), c))
                     o += len(gid)
                 data['_hit_fix'] = fix

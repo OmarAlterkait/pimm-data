@@ -9,7 +9,8 @@ is read whole, as nested tables::
      'track': {'id': (T,)},
      'v{N}': {'group_to_track': (G_v,), 'group_fragment': (G_v,),
               ['deposit_in_window': (N_v,)], ['deposit_to_group': (N_v,)],
-              ['plane_<name>': {['on_sensor': (E,) bool],
+              ['plane_<name>': {['group': (G_plane,)] (plane id -> volume group),
+                                ['on_sensor': (E,) bool],
                                 ['override_index', 'override_fragment',
                                  'override_instance': (K,)]}]}}
 """

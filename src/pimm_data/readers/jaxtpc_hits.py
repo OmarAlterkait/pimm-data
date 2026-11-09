@@ -211,6 +211,8 @@ class JAXTPCHitsReader(JAXTPCReadoutReader):
                     continue
 
                 prefix = f'hits.{plane_label}'
+                # the plane's group count: a labl plane map must cover exactly it
+                data_dict[f'n_groups_plane:{plane_label}'] = len(pg['group_ids'])
                 if self.readout_type == 'pixel':
                     py, pz, times, gids, charges = self._decode_plane_pixel(pg)
                     data_dict[f'{prefix}.py'] = py

@@ -1111,3 +1111,118 @@ def to_plane_local(step_path, hits_path, labl_path, step_out, hits_out,
                             c[k][...] = c[k][:][srt]
                     c.create_dataset('group', data=pi[gid[order]].astype(np.int32))
     return step_out, hits_out, labl_out
+
+
+def to_final_v2(step_path, hits_path, labl_path, step_out, hits_out, labl_out,
+                seed=0):
+    """Rewrite a shared-step step/hits/labl triple (labl with ``deposit_in_window``)
+    in the final v2 layout: step keeps only in-window deposits, rows shuffled
+    (root attr ``deposits='in_window'``); groups with neither an in-window
+    deposit nor a hit are dropped and the rest renumbered by a random
+    permutation (``deposit_to_group``, ``n_groups``, labl ``group_to_track`` /
+    ``group_fragment``); hits planes as :func:`to_plane_local`; labl loses
+    ``deposit_in_window``. ``qs_fractions`` are kept as written (a group
+    straddling the window sums below 1). Returns ``{(entry, volume): (pi,
+    srow)}``: ``pi[source group]`` = new id or -1, ``srow[new row]`` = source
+    row."""
+    rng = np.random.default_rng(seed)
+    perm = {}
+
+    def head(src, dst):
+        for k, v in src.attrs.items():
+            dst.attrs[k] = v
+        for k in src:
+            if not k.startswith('entry_'):
+                src.copy(src[k], dst, name=k)
+
+    with h5py.File(step_path, 'r') as S, h5py.File(hits_path, 'r') as H, \
+            h5py.File(labl_path, 'r') as L, h5py.File(step_out, 'w') as So, \
+            h5py.File(hits_out, 'w') as Ho, h5py.File(labl_out, 'w') as Lo:
+        head(S, So); head(H, Ho); head(L, Lo)
+        So.attrs['deposits'] = 'in_window'
+        Ho.attrs['group_id_space'] = 'plane'
+        for e in sorted(k for k in L if k.startswith('entry_')):
+            se, he, le = So.create_group(e), Ho.create_group(e), Lo.create_group(e)
+            for src, dst in ((S[e], se), (H[e], he), (L[e], le)):
+                for k, v in src.attrs.items():
+                    dst.attrs[k] = v
+            for k in L[e]:
+                if not k.startswith('volume_'):
+                    L.copy(L[e][k], le, name=k)
+            for v in sorted(k for k in L[e] if k.startswith('volume_')):
+                sv, hv, lv = S[e][v], H[e][v], L[e][v]
+                inw = lv['deposit_in_window'][()].astype(bool)
+                d2g = sv['deposit_to_group'][()].astype(np.int64)
+                G = len(lv['group_to_track'])
+                planes = [p for p in hv if isinstance(hv[p], h5py.Group)]
+                used = np.zeros(G, bool)
+                used[d2g[inw & (d2g >= 0)]] = True
+                for p in planes:
+                    used[hv[p]['group_ids'][()]] = True
+                ids = np.flatnonzero(used)
+                order = rng.permutation(ids)
+                pi = np.full(G, -1, np.int64)
+                pi[order] = np.arange(len(order))
+                inv = order                       # new id -> source id
+                srow = rng.permutation(np.flatnonzero(inw))
+                perm[(e, v)] = (pi, srow)
+                n = len(d2g)
+                svo = se.create_group(v)
+                for k, a in sv.attrs.items():
+                    svo.attrs[k] = a
+                svo.attrs['n_actual'] = len(srow)
+                svo.attrs['n_groups'] = len(ids)
+                for k in sv:
+                    x = sv[k][()]
+                    assert x.shape[:1] == (n,), (e, v, k)
+                    x = x[srow]
+                    if k == 'deposit_to_group':
+                        x = np.where(x >= 0, pi[np.clip(x, 0, None)], x).astype(sv[k].dtype)
+                    svo.create_dataset(k, data=x)
+                hvo = he.create_group(v)
+                for k, a in hv.attrs.items():
+                    hvo.attrs[k] = a
+                hvo.attrs['n_groups'] = len(ids)
+                lvo = le.create_group(v)
+                for k, a in lv.attrs.items():
+                    lvo.attrs[k] = a
+                for k in ('group_to_track', 'group_fragment'):
+                    lvo.create_dataset(k, data=lv[k][()][inv])
+                for p in planes:
+                    o = hv[p]
+                    gid = o['group_ids'][()]
+                    sizes = o['group_sizes'][()].astype(np.int64)
+                    bo = rng.permutation(len(gid))
+                    st = np.concatenate([[0], np.cumsum(sizes)[:-1]])
+                    nn = sizes[bo]
+                    ent = (np.repeat(st[bo] - np.concatenate([[0], np.cumsum(nn)[:-1]]), nn)
+                           + np.arange(nn.sum()))
+                    po = hvo.create_group(p)
+                    for k, a in o.attrs.items():
+                        po.attrs[k] = a
+                    for k in o:
+                        x = o[k][()]
+                        x = (np.arange(len(x), dtype=x.dtype) if k == 'group_ids'
+                             else x[bo] if k in _PER_GROUP else x[ent])
+                        po.create_dataset(k, data=x)
+                    c = lvo.create_group(f'plane_{p}')
+                    if f'plane_{p}' in lv:
+                        c0 = lv[f'plane_{p}']
+                        for k, a in c0.attrs.items():
+                            c.attrs[k] = a
+                        if 'on_sensor' in c0:
+                            nb = int(c0['on_sensor'].attrs['n'])
+                            bits = np.unpackbits(c0['on_sensor'][()], count=nb)[ent]
+                            c.create_dataset('on_sensor', data=np.packbits(bits))
+                            c['on_sensor'].attrs['n'] = nb
+                        if 'override_index' in c0:
+                            ie = np.empty(len(ent), np.int64)
+                            ie[ent] = np.arange(len(ent))
+                            ni = ie[c0['override_index'][()]]
+                            s_ = np.argsort(ni, kind='stable')
+                            c.create_dataset('override_index',
+                                             data=ni[s_].astype(c0['override_index'].dtype))
+                            for k in ('override_fragment', 'override_instance'):
+                                c.create_dataset(k, data=c0[k][()][s_])
+                    c.create_dataset('group', data=pi[gid[bo]].astype(np.int32))
+    return perm

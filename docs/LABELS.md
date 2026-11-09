@@ -42,7 +42,7 @@ partitions wire on deposits and pixel on hits. So there is one `labl` per readou
 |---|---|---|
 | step / hits / sensor + `labl` | supervised | `step.group` / `hits.group` → `labl` |
 | step / hits / sensor, no `labl` | self-supervised | the point files alone |
-| step + hits, no `labl` | matching | `step.group` == `hits.group`, weighted by `step.qs` |
+| step + hits + `labl` | matching | `step.group` == `hits.group` (hits through labl's plane maps), weighted by `step.qs`; without labl the final layout gives hits only `plane_group`, so nothing links them |
 
 The group is the correspondence key that step and hits share. It is not a
 label, so pimm-data exposes it (`step.group`, `hits.group` → a `group` part)
@@ -51,6 +51,21 @@ whenever hits is loaded or `labels=` is set. Every truth above the group
 nowhere else.
 
 ## What lives where
+
+**The final layout (v2)** is the one released for training
+(`doraemon_2026_1M_lartpc/final_10k`; layout and examples in `examples/doraemon_final/`):
+- step per readout, holding only that readout's in-window deposits (root attr
+  `deposits='in_window'`), rows in position order; `deposit_to_group` (groups numbered
+  by position), `qs_fractions` (a group straddling the window edge sums below 1);
+- groups with neither an in-window deposit nor a hit dropped (pysupera owned none);
+- hits per plane with plane-local ids (root attr `group_id_space='plane'`);
+- labl with `group_to_track`, `group_fragment`, per plane `plane_<P>/group` (plane id ->
+  volume group), and no `deposit_in_window` (so no `step.in_window`).
+
+Correspondence between planes, and between hits and step, exists only through labl.
+`tests/test_final_v2.py` and `tests/test_pysupera_golden.py` check it. The sections
+below describe the earlier shared-step layout, which pimm-data still reads.
+
 
 The rule: **a point file carries nothing above the group.** Step carries
 deposit → group, and hits carries hit entry → group. Everything from the group
@@ -224,11 +239,15 @@ entry_NNNNNN/
                                      group_to_track, from step or hits)
     deposit_to_group  (N_v,) int32   ONLY when step lacks it (produced layout):
                                      copy from hits, the step -> group bridge
+    (final v2: no deposit_to_group / deposit_in_window; every step deposit is in the
+     window, and step carries deposit_to_group)
     deposit_in_window (N_v,) bool    the deposit's charge arrives inside the
                                      readout window (needs --step --sensor)
     group_fragment    (G_v,) int32   pysupera groups/fragment_id as a particle row
                                      (-1: pysupera left the group unowned)
-    plane_<name>/                    per hits plane, only where needed:
+    plane_<name>/                    per hits plane (final v2: every plane):
+      group           (G_plane,) int32  plane-local hit group id -> volume group id
+                                     (only with plane-local hits)
       on_sensor       packed bits    pixel: hits on a sensor pixel (attr n); the
                                      others get no label, as in hit_labels
       override_index / override_fragment / override_instance

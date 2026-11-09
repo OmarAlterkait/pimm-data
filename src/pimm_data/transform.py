@@ -23,21 +23,9 @@ from ._registry import Registry
 TRANSFORMS = Registry("transforms")
 
 
-# Generic multi-task label schema (D22/D25): any key named segment_*/
-# instance_*/target_* is a per-point label axis, plus these per-point FK
-# columns. They must survive N-changing transforms (GridSample, dropout, …)
-# rather than being silently dropped or length-mismatched.
-_INDEX_SCHEMA_PREFIXES = ("segment", "instance", "target")
-# is_primary: per point wherever it is length-N (PILArNet v3, supera-labl
-# JAXTPC); it used to be carried only under revision == 'v3'.
-_INDEX_PER_POINT_KEYS = ("particle_idx", "sensor_idx", "plane_id",
-                         "is_primary")
-
-# Keys index_operator always carries through a point subsample. The schema
-# axes (segment_*/instance_*/target_*) and per-point FK columns are NOT listed
-# here — _augment_index_valid_keys adds whichever are present, per-point-guarded
-# (so a per-event target_* is not subset). One source of truth for the schema
-# axes, instead of literal ∪ predicate with a hidden overlap.
+# Keys index_operator always carries through a point subsample (when present
+# and one row per point). Every other per-point key is found from the roles
+# contract by _augment_index_valid_keys, so this list is not a whitelist.
 _DEFAULT_INDEX_VALID_KEYS = [
     "coord", "color", "normal", "strength", "energy", "local_shape",
     "momentum",
@@ -50,35 +38,46 @@ _DEFAULT_INDEX_VALID_KEYS = [
 ]
 
 
-def _augment_index_valid_keys(data_dict):
-    """Append present schema/FK keys to ``index_valid_keys`` (D25).
+_SLICED_KINDS = ("point", "ref", "label")
 
-    Underscore-boundary prefix match on ``segment_*``/``instance_*``/
-    ``target_*`` plus the per-point FK columns. A key qualifies only if its
-    leading dim equals the point count — so per-event ``target_*`` (e.g. a
-    length-3 ``target_vertex``) is NOT point-subset.
+
+def _augment_index_valid_keys(data_dict):
+    """Add every per-point key of this part to ``index_valid_keys``.
+
+    The roles contract (``_roles``): a key not listed in ``_roles`` whose
+    leading dim equals the point count is a ``point`` key, one row per point;
+    ``ref`` and ``label`` keys are per point too. All of them are sliced with
+    the points. ``raw`` (immutable per-point COO), ``event`` (per-event, even if
+    its length happens to equal the point count), ``instance`` (a second
+    row-space) and edge keys are not (self-edges are remapped by
+    :func:`_remap_self_edges`). Nothing depends on a key's name, so a new
+    per-point column (e.g. hits ``plane_group``) needs no registration.
     """
+    from . import _roles as roles_mod
     coord = data_dict.get("coord")
     if coord is None or not hasattr(coord, "shape"):
         return
     n_points = coord.shape[0]
+    roles = data_dict.get("_roles") or {}
     valid = data_dict["index_valid_keys"]
     present = set(valid)
-    # A ('ref', part) column is one row per point (its VALUES index another
-    # part, which a point subsample leaves alone), so it is sliced with them.
-    refs = {k for k, r in (data_dict.get("_roles") or {}).items()
-            if isinstance(r, (tuple, list)) and r and r[0] == "ref"}
-    for k in list(data_dict.keys()):
-        if k in present or k == "index_valid_keys":
+    for k, v in data_dict.items():
+        if k in present or k in ("index_valid_keys", "_roles", "offset"):
             continue
-        is_schema = any(k == p or k.startswith(p + "_")
-                        for p in _INDEX_SCHEMA_PREFIXES)
-        if not (is_schema or k in _INDEX_PER_POINT_KEYS or k in refs):
+        shape = getattr(v, "shape", None)
+        if not shape or shape[0] != n_points:
             continue
-        v = data_dict[k]
-        if getattr(v, "shape", None) and v.shape[0] == n_points:
+        kind = roles_mod.role_kind(roles[k]) if k in roles else "point"
+        if kind in _SLICED_KINDS:
             valid.append(k)
             present.add(k)
+    # a listed key that is declared non-point, or is not one row per point,
+    # is not sliced either
+    data_dict["index_valid_keys"] = [
+        k for k in valid
+        if k not in data_dict
+        or (getattr(data_dict[k], "shape", None) and data_dict[k].shape[0] == n_points
+            and (k not in roles or roles_mod.role_kind(roles[k]) in _SLICED_KINDS))]
 
 
 def _valid_vertex_mask(data_dict):
@@ -174,14 +173,8 @@ def index_operator(data_dict, index, duplicate=False):
     # custom these keys by "Update" transform in config
     if "index_valid_keys" not in data_dict:
         data_dict["index_valid_keys"] = list(_DEFAULT_INDEX_VALID_KEYS)
-    # PILArNet v3 carries a per-point primary-particle flag alongside the
-    # cluster vertex; keep it aligned through subsampling/cropping.
-    if data_dict.get("revision") == "v3" and "is_primary" in data_dict \
-            and "is_primary" not in data_dict["index_valid_keys"]:
-        data_dict["index_valid_keys"].append("is_primary")
-    # plane_id (per-point sparse plane label) is carried via _INDEX_PER_POINT_KEYS;
-    # wire/time/value/plane_gid (dense-path scatter inputs) are intentionally not
-    # subset — densify consumes them as immutable raw COO.
+    # every per-point key of the part, by the roles contract (not by name);
+    # the dense-path raw COO lives in the nested 'raw' dict and is never sliced
     _augment_index_valid_keys(data_dict)
     # roles-aware edge remap (REDESIGN §4): a self-edge key indexes this part's rows,
     # so subsampling must DROP edges to removed rows and REINDEX, not slice. Makes
