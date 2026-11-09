@@ -159,10 +159,10 @@ def test_hard_example_crop_reads_a_named_label(jaxtpc_data_root):
     s = make_ds(jaxtpc_data_root, ('step',),
                 labels='segment_motif').get_data(0)['step']
     crop = TRANSFORMS.build(dict(type='HardExampleCrop', point_max=20,
-                                 hard_labels=(3,), p=1.0,
+                                 hard_labels=(1,), p=1.0,
                                  segment_key='segment_motif'))
     out = crop(dict(s))
-    assert len(out['coord']) == 20 and (out['segment_motif'] == 3).any()
+    assert len(out['coord']) == 20 and (out['segment_motif'] == 1).any()
 
 
 def test_label_role_compacts_instance_rows(jaxtpc_data_root):

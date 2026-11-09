@@ -173,7 +173,10 @@ class JAXTPCHitsReader(JAXTPCReadoutReader):
 
             vol_idx = vol_key.replace('volume_', '')
 
-            # Per-volume (per-deposit and per-group) arrays
+            # Per-volume (per-deposit and per-group) arrays. The deposit and
+            # track ones are older files' (they belong in step and labl).
+            if 'n_groups' in vol.attrs:
+                data_dict[f'n_groups_v{vol_idx}'] = int(vol.attrs['n_groups'])
             if 'group_to_track' in vol:
                 data_dict[f'group_to_track_v{vol_idx}'] = \
                     vol['group_to_track'][:].astype(np.int32)

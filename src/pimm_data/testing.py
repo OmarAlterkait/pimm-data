@@ -221,8 +221,12 @@ def _build_jaxtpc_event(rng, n_volumes, n_deposits, n_groups, n_tracks,
         t0_us = rng.uniform(0.0, 10.0, size=n_deposits).astype(np.float16)
         charge = rng.uniform(1e3, 5e4, size=n_deposits).astype(np.float16)
         photons = rng.uniform(1e3, 5e4, size=n_deposits).astype(np.float16)
-        qs_fractions = rng.uniform(0.01, 1.0, size=n_deposits).astype(
-            np.float32)
+        rng.uniform(0.01, 1.0, size=n_deposits)     # keep the rng stream
+        # JAXTPC's: the deposit's share of its group's charge, float16
+        q = charge.astype(np.float64)
+        qs_fractions = (q / np.bincount(deposit_to_group, weights=q,
+                                        minlength=n_groups)[deposit_to_group]
+                        ).astype(np.float16)
 
         planes = {}
         for plane in plane_names:
@@ -473,14 +477,19 @@ def make_supera(hits_path, out_path, seed=0):
     either). Each group's owner is a function of its track; about 10% of
     groups and every volume's group 0 stay unowned, and two groups per volume
     are owned by a different fragment than their track (pysupera's split
-    tracks)."""
+    tracks). ``hit_labels`` are pysupera's per-hit answer: the group's owner
+    and its instance; on pixel, about 15% of hits are off the sensor (-1, and
+    ``on_sensor`` False), and a few on-sensor hits carry another fragment (a
+    group pysupera split)."""
     rng = np.random.default_rng(seed)
+    hrng = np.random.default_rng(seed + 991)     # leaves rng's stream alone
+    hl = {}                                      # (v, plane) -> lists
     cols = {k: [] for k in (
         'id', 'frag_id', 'inst_id', 'frag_inst_id', 'frag_parent_id',
         'inst_parent_id', 'parent_id', 'ancestor_id', 'interaction_id',
         'pdg', 'sem_type', 'frag_sem_type', 'inst_sem_type',
         'interaction_type', 'geant4_trackid', 'geant4_parent_trackid',
-        'geant4_parent_pdg', 'mass')}
+        'geant4_parent_pdg', 'frag_merge_count', 'inst_merge_count', 'mass')}
     kin = {k: [] for k in ('start_pos', 'start_mom', 'first_pos', 'first_mom',
                            'last_pos', 'last_mom', 'end_pos', 'end_mom')}
     inter = {k: [] for k in ('x', 'y', 'z', 'time', 'vertex_id',
@@ -513,6 +522,8 @@ def make_supera(hits_path, out_path, seed=0):
                 cols['geant4_trackid'].append(r + 1)
                 cols['geant4_parent_trackid'].append(-1 if r < 2 else 1)
                 cols['geant4_parent_pdg'].append(-1 if r < 2 else 13)
+                cols['frag_merge_count'].append(2 if fr else -1)
+                cols['inst_merge_count'].append(3 if r < 3 else -1)
                 cols['mass'].append(105.66)
             for c in kin:
                 kin[c].append(rng.normal(size=(7, 4)) * 100)
@@ -534,6 +545,26 @@ def make_supera(hits_path, out_path, seed=0):
                 own[split] = (own[split] + 1) % 6
                 own[0] = -1
                 frag_ids.extend(np.where(own >= 0, ids[np.maximum(own, 0)], -1))
+                v = int(vk.split('_')[1])
+                inst_of = np.array([_SUPERA_INSTANCE_OF[r] for r in range(6)])
+                for pk, pg in hi[k][vk].items():
+                    if not isinstance(pg, h5py.Group) or 'group_ids' not in pg:
+                        continue
+                    gid = np.repeat(pg['group_ids'][:], pg['group_sizes'][:])
+                    o = own[gid]
+                    if readout == 'pixel':
+                        on = hrng.random(len(gid)) > 0.15
+                        o = np.where(on, o, -1)
+                    else:
+                        on = None
+                    sp = np.flatnonzero(o >= 0)[:3]      # split-group hits
+                    o[sp] = (o[sp] + 2) % 6
+                    d = hl.setdefault((v, pk), dict(f=[], i=[], on=[], n=[0]))
+                    d['f'].append(np.where(o >= 0, ids[np.maximum(o, 0)], -1))
+                    d['i'].append(np.where(o >= 0, ids[inst_of[np.maximum(o, 0)]], -1))
+                    if on is not None:
+                        d['on'].append(on)
+                    d['n'].append(d['n'][-1] + len(gid))
                 v_off.append(base)
                 base += len(g2t)
             g_off.append(g_off[-1] + base)
@@ -564,6 +595,15 @@ def make_supera(hits_path, out_path, seed=0):
             i[c] = np.array(v, np.float32)
         i['offsets'] = np.array(i_off, np.int64)
         i['reaction'] = np.array([b''] * len(inter['x']), dtype=object)
+        for (v, pk), d in hl.items():
+            g = f.create_group(f'hit_labels/volume{v}/plane{pk}')
+            g.attrs.update(volume=v, source=pk)
+            g['fragment_id'] = np.concatenate(d['f']).astype(np.int32)
+            g['instance_id'] = np.concatenate(d['i']).astype(np.int32)
+            g['is_le'] = np.zeros(d['n'][-1], bool)
+            g['offsets'] = np.array(d['n'], np.int64)
+            if d['on']:
+                g['on_sensor'] = np.concatenate(d['on'])
     return out_path
 
 
@@ -963,3 +1003,41 @@ def make_optical_sample(outdir, dataset_name='optical', n_events=2, n_files=1,
 
 
 __all__ = ['make_jaxtpc_sample', 'make_lucid_sample', 'make_optical_sample']
+
+
+GROUP_ARRAYS = ('deposit_to_group', 'qs_fractions', 'group_to_track')
+STEP_GROUP_ARRAYS = ('deposit_to_group', 'qs_fractions')   # g2t is a label
+
+
+def to_shared_step(step_path, hits_path, step_out, hits_out):
+    """Rewrite one JAXTPC step/hits pair in the shared-step layout:
+    ``deposit_to_group``, ``qs_fractions`` and the ``n_groups`` attr move from
+    hits to step; ``group_to_track`` (label truth) leaves both, and the labl
+    writer takes it from the produced hits (``track_path``); hits keeps its
+    entries, group ids and ``n_groups``. Copies selectively (HDF5 does not reclaim deleted space)."""
+    def copy(s, d, drop=()):
+        for k, v in s.attrs.items():
+            d.attrs[k] = v
+        for k in s:
+            o = s[k]
+            if isinstance(o, h5py.Group) and k.startswith(('entry_', 'volume_')):
+                copy(o, d.create_group(k), drop)
+            elif not (k in drop and s.name.rsplit('/', 1)[-1]
+                      .startswith('volume_')):
+                s.copy(k, d)
+
+    with h5py.File(step_path, 'r') as s, h5py.File(hits_path, 'r') as h, \
+            h5py.File(step_out, 'w') as so, h5py.File(hits_out, 'w') as ho:
+        copy(s, so)
+        copy(h, ho, drop=GROUP_ARRAYS)
+        for e in (k for k in h if k.startswith('entry_')):
+            for v in (k for k in h[e] if k.startswith('volume_')):
+                hv, sv = h[e][v], so[e].require_group(v)
+                sv.attrs['n_groups'] = int(hv.attrs.get(
+                    'n_groups', len(hv['group_to_track'])))
+                ho[e][v].attrs['n_groups'] = sv.attrs['n_groups']
+                for c in STEP_GROUP_ARRAYS:
+                    if c in hv:
+                        h.copy(hv[c], sv, name=c)
+    return step_out, hits_out
+

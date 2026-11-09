@@ -6,6 +6,11 @@ declared in each part's ``_roles``. A label is a walk along those links:
 
     step.group -> group.fragment -> particle.fragment_instance -> particle.pdg
 
+Labels follow pysupera's own convention (its ``torchdata``): a point's fragment
+is pysupera's owner of its group (per hit, pysupera's ``hit_labels``), its
+instance that fragment's instance, and its class the instance's semantic type,
+or ``le`` for a point of a low-energy-scatter fragment (motif and PID alike).
+
 :func:`follow` performs one such walk. It reads the target of every hop from
 the roles, so it knows nothing about JAXTPC or pysupera; a detector only has to
 name its parts and declare its references. Walks work per event (numpy) and
@@ -88,9 +93,14 @@ def pid_of(pdg, inst_sem):
 def add_vocabulary(data):
     """Derived table columns, once per event (idempotent):
 
-    ``particle.motif``    fragment class (shower 0 … le 4) of a fragment row
+    ``particle.motif``    point class of a fragment row (shower 0 … le 4): le
+                          for an LE fragment, else its instance's semantic type
+    ``particle.is_le``    the fragment row is a low-energy scatter
     ``particle.pid``      photon 0, electron 1, muon 2, pion 3, proton 4, le 5
+                          (of an instance row; a point of an LE fragment is le)
     ``particle.is_primary`` the row is its own ``parent``
+    ``particle.parent_pdg`` PDG of the ``parent`` row (pysupera's
+                          ``parent_pdg``; equal on every row of 1M)
     ``particle.momentum_start`` / ``momentum_first``  ``|p|`` (MeV/c) at
                           creation / at the first visible step (NaN if none)
     ``interaction.vertex`` ``(I, 3)`` x, y, z (mm)
@@ -98,9 +108,16 @@ def add_vocabulary(data):
     part = data.get('particle')
     if part is not None and 'motif' not in part:
         rows = np.arange(len(part['parent']))
-        part['motif'] = motif_of_sem(part['fragment_sem_type'])
+        le = np.asarray(part['fragment_sem_type']) == SEM_LE
+        part['is_le'] = le.astype(np.int32)
+        part['motif'] = np.where(le, MOTIF_NAMES.index('le'),
+                                 motif_of_sem(part['instance_sem_type'])) \
+            .astype(np.int32)
         part['pid'] = pid_of(part['pdg'], part['instance_sem_type'])
-        part['is_primary'] = (np.asarray(part['parent']) == rows).astype(np.int32)
+        par = np.asarray(part['parent'])
+        part['is_primary'] = (par == rows).astype(np.int32)
+        part['parent_pdg'] = np.where(
+            par >= 0, np.asarray(part['pdg'])[np.maximum(par, 0)], 0)
         for which in ('start', 'first'):
             mom = np.asarray(part[f'{which}_mom'], dtype=np.float64)[:, :3]
             part[f'momentum_{which}'] = np.sqrt((mom ** 2).sum(axis=1)) \
@@ -113,7 +130,8 @@ def add_vocabulary(data):
     return data
 
 
-_INST = ('group', 'fragment', 'fragment_instance')
+_INST = ('_instance',)
+_FRAG = ('_fragment',)
 
 #: out key -> (path, fill). ``{momentum}`` is ``start`` or ``first``. The
 #: names are the PILArNet keys pimm's heads and evaluators read; classes are
@@ -121,10 +139,10 @@ _INST = ('group', 'fragment', 'fragment_instance')
 #: ``interaction`` for ``instance_interaction``).
 PRESETS = {
     'pilarnet': {
-        'segment_motif': (('group', 'fragment', 'motif'), -1),
+        'segment_motif': (_FRAG + ('motif',), -1),
         'segment_pid': (_INST + ('pid',), -1),
         'segment_pdg': (_INST + ('pdg',), -1),     # raw, for RemapSegment
-        'instance_fragment': (('group', 'fragment'), -1),
+        'instance_fragment': (_FRAG, -1),
         'instance_particle': (_INST, -1),
         'instance_interaction': (_INST + ('interaction',), -1),
         'is_primary': (_INST + ('is_primary',), -1),
@@ -138,9 +156,11 @@ PRESETS = {
 #: is a class per point and an id per object of a ``thing`` class; a point of
 #: the stuff class is no object at that level (-1). Each level takes its stuff
 #: from its OWN class, so "stuff <=> no instance" holds by construction: a
-#: low-energy scatter is stuff as a fragment (motif le) but, inside a shower
-#: electron, still part of that electron (pid electron). Interactions have no
-#: class; every point of one, low-energy or not, belongs to it. Motif is not a
+#: point of a low-energy-scatter fragment is le in motif and PID alike
+#: (pysupera's convention), so with ``le_is_stuff`` it has no fragment and no
+#: particle id; without it, it keeps its host's, as pysupera's ``include_le``
+#: does. Interactions have no class; every point of one, low-energy or not,
+#: belongs to it. Motif is not a
 #: particle class (a particle's fragments can differ in motif); it stays a
 #: per-point target.
 LEVELS = {
@@ -186,19 +206,20 @@ def resolve(data, on, keys, preset='pilarnet', momentum='start',
         return data
     add_vocabulary(data)
     sub = data[on]
+    own = '_fragment' not in sub
+    if own:
+        point_refs(data, on)
+    if '_fragment' not in sub:
+        return data
     for out in keys:
         path, fill = PRESETS[preset][out]
         path = tuple(p.format(momentum=momentum) for p in path)
         if path[-1] not in data[_last_part(data, on, path)]:
             continue          # the table lacks the column (e.g. no vertex)
-        v = follow(data, on, path, fill=fill)
-        if v.dtype.kind == 'f':
-            v = np.nan_to_num(v, nan=fill).astype(np.float32)
-        else:
-            v = v.astype(np.int32)
+        v = _value(data, on, out, preset, momentum)
         if le_is_stuff and out in _STUFF:
             cls, stuff = _STUFF[out]
-            v[follow(data, on, PRESETS[preset][cls][0]).reshape(v.shape)
+            v[_value(data, on, cls, preset, momentum).reshape(v.shape)
               == stuff] = -1
         sub[out] = v if v.ndim == 2 else v[:, None]
         if out.startswith('instance_'):
@@ -206,7 +227,55 @@ def resolve(data, on, keys, preset='pilarnet', momentum='start',
             # unique across the batch, so merged or batched events never
             # share one; per event it is a table row until then
             sub.setdefault('_roles', {})[out] = ('label', out)
+    if own:
+        drop_point_refs(sub)
     return data
+
+
+def _value(data, on, out, preset, momentum):
+    path, fill = PRESETS[preset][out]
+    path = tuple(p.format(momentum=momentum) for p in path)
+    v = follow(data, on, path, fill=fill)
+    if v.dtype.kind == 'f':
+        return np.nan_to_num(v, nan=fill).astype(np.float32)
+    v = v.astype(np.int32)
+    if out == 'segment_pid':        # a point of an LE fragment is le
+        v[follow(data, on, _FRAG + ('is_le',)).reshape(v.shape) == 1] = \
+            PID_NAMES.index('le')
+    return v
+
+
+def point_refs(data, on, hit_fix=None):
+    """Each point's fragment and instance (``_fragment``, ``_instance``,
+    refs into ``particle``): its group's pysupera owner and that fragment's
+    instance. ``hit_fix`` (hits only): ``[(start, n, plane corrections)]``
+    from labl, which make them pysupera's per-hit labels: no label off the
+    sensor, and each listed hit's own fragment and instance."""
+    if on not in data or 'particle' not in data or 'group' not in data[on] \
+            or 'fragment' not in data.get('group', {}):
+        return
+    sub = data[on]
+    frag = follow(data, on, ('group', 'fragment')).astype(np.int32)
+    inst = _take(data['particle']['fragment_instance'], frag, -1) \
+        .astype(np.int32)
+    for start, n, c in hit_fix or ():
+        if 'on_sensor' in c:
+            off = start + np.flatnonzero(~c['on_sensor'])
+            frag[off] = -1
+            inst[off] = -1
+        if 'override_index' in c:
+            i = start + np.asarray(c['override_index'], np.int64)
+            frag[i] = c['override_fragment']
+            inst[i] = c['override_instance']
+    sub['_fragment'], sub['_instance'] = frag, inst
+    sub.setdefault('_roles', {}).update(_fragment=('ref', 'particle'),
+                                        _instance=('ref', 'particle'))
+
+
+def drop_point_refs(sub):
+    for k in ('_fragment', '_instance'):
+        sub.pop(k, None)
+        (sub.get('_roles') or {}).pop(k, None)
 
 
 def _last_part(data, on, path):

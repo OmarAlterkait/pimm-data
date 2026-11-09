@@ -27,7 +27,9 @@ from pimm_data import JAXTPCDataset, collate_fn
 
 # --- frozen fingerprints (captured from current behavior, synthetic seed=0) ---
 # Labels re-captured when they became pysupera's named labels (low-energy
-# scatters are stuff: no particle instance).
+# scatters are stuff: no particle instance), and again when they followed
+# pysupera's convention exactly (its group owners and hit_labels; class from
+# the instance, le for an LE fragment).
 # value = (shape, dtype, sha1(bytes)[:16]) for arrays; repr(...) for metadata.
 C1_BATCH = {
     'coord': ((240, 3), 'float32', 'ec942392e142f1f7'),
@@ -41,13 +43,13 @@ C2_BATCH = {
     'feat':  ((240, 4), 'float32', '8194f574fbe936da'),
     'name':  "['sim_step_0000.h5_evt000', 'sim_step_0000.h5_evt001']",
     'offset': ((2,), 'int64', '2bf2fc17c20c1d7d'),
-    'segment_pdg': ((240, 1), 'int32', 'c235d52f825dea91'),
+    'segment_pdg': ((240, 1), 'int32', '7422220c1bc87329'),
     'split': "['', '']",
 }
-STEP_SEG = ((120, 1), 'int32', '60804b51265fa5c1')
+STEP_SEG = ((120, 1), 'int32', '3479f3d912448eac')
 STEP_INST = ((120, 1), 'int32', '8bbd4f196b6a4c62')
-HITS_SEG = ((240, 1), 'int32', '6b86958984a415c3')
-HITS_INST = ((240, 1), 'int32', '69bd8e79ac65a146')
+HITS_SEG = ((240, 1), 'int32', '0b7455135d79ae4a')
+HITS_INST = ((240, 1), 'int32', '3b032b9590abe675')
 
 
 def _fp(x):

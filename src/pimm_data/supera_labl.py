@@ -1,23 +1,25 @@
 """Write a JAXTPC ``labl`` file from one pysupera (format 4.x) output.
 
-The label of a deposit or a hit is the label of its JAXTPC *group*, and a
-group belongs to one Geant4 track. pysupera records, per group, the fragment
-that owns it (``groups/fragment_id``); that owner is a function of the group's
-track for all but about one track in a million, so ``labl`` stores the
-hierarchy once, as maps, with those few groups listed as overrides:
+The label of a deposit or a hit is pysupera's: the fragment pysupera says owns
+its JAXTPC *group* (``groups/fragment_id``), and per hit pysupera's
+``hit_labels``. pysupera is the reference; nothing here relabels. ``labl``
+stores, per event:
 
-    group -> track -> fragment -> instance -> interaction
+    group -> fragment -> instance -> interaction,   group -> track
 
-* per volume, copies of the JAXTPC ``deposit_to_group`` and
-  ``group_to_track`` (as ``group_track``), so step+labl needs no hits file;
-* ``track``: each visible Geant4 track (``id``, sorted) and the ``fragment``
-  row that owns it (the owner of most of its groups); per volume,
-  ``override_group`` / ``override_fragment`` for the owned groups whose owner
-  differs (a track pysupera split between fragments). A particle row is not enough: a quarter to a third of
-  visible tracks have none (merged into another fragment), and a merged delta
-  ray's own row is not its owner;
+* per volume, ``group_fragment``: ``groups/fragment_id`` as particle rows (-1:
+  pysupera left the group unowned), and JAXTPC's ``group_to_track``: the one
+  link from a group to its Geant4 track (step has no per-deposit track id); and,
+  only when the step file does not carry it (files produced before the
+  shared-step layout), a copy of ``deposit_to_group``, so step+labl needs no
+  hits;
+* per volume and hits plane, only where ``hit_labels`` are not the group's:
+  ``on_sensor`` (pixel; packed bits) and ``override_index`` /
+  ``override_fragment`` / ``override_instance`` (hits of groups pysupera split);
+* ``track/id``: the visible Geant4 tracks (owning a group), sorted;
 * the ``particle`` table (fragment -> instance -> interaction, and the rest of
-  each row) and the ``interaction`` table;
+  each row; pysupera's float64 mass and kinematics stored as float32) and the
+  ``interaction`` table;
 * given the step and sensor files, ``deposit_in_window`` per volume: whether
   the deposit's charge arrives inside the readout window. An unowned group is
   either out of the window or under threshold, and only this tells them apart.
@@ -29,7 +31,7 @@ Everything is copied; the one transformation is that pysupera ids (``id``,
 positions within the event. What is left out, and why, is in
 ``docs/LABELS.md``: voxels and point ranges, ``hit_labels`` and
 ``groups/is_le`` (both derivable from the group map), ``parent_pdg``
-(derivable from ``parent``), merge counts and pysupera's own bookkeeping.
+(derivable from ``parent``) and pysupera's own bookkeeping.
 
 The file mirrors the JAXTPC file it labels: the same ``entry_NNNNNN`` groups in
 the same order, each carrying ``event_id`` / ``job_id`` / ``job_event``, and the
@@ -81,6 +83,10 @@ VALUE_COLUMNS = (
     ('geant4_trackid', 'geant4_trackid'),
     ('geant4_parent_trackid', 'geant4_parent_trackid'),
     ('geant4_parent_pdg', 'geant4_parent_pdg'),
+    ('fragment_merge_count', 'frag_merge_count'),  # pysupera particles in it
+    ('instance_merge_count', 'inst_merge_count'),  # (split pieces and buried
+                                                   # deltas count; -1: not that
+                                                   # level). Not derivable.
     ('mass', 'mass'),
     ('start_pos', 'start_pos'), ('start_mom', 'start_mom'),
     ('first_pos', 'first_pos'), ('first_mom', 'first_mom'),
@@ -156,24 +162,57 @@ def _in_window(sv, anode, w):
     return (tick >= 0) & (tick < w['n'])
 
 
-def _track_owner(own_t, own_f):
-    """Per volume, the owned groups' Geant4 tracks and owners -> sorted track
-    ids, each track's owner (the one owning most of its groups), and per
-    volume a mask of the groups whose owner differs (None if none do)."""
-    t = np.concatenate(own_t).astype(np.int64)
-    f = np.concatenate(own_f).astype(np.int64)
-    # (track, fragment) pairs as one int64 key: a 1-D sort, not a row sort
-    keys, counts = np.unique((t << 32) | f, return_counts=True)
-    pt, pf = keys >> 32, keys & 0xFFFFFFFF
-    if len(np.unique(pt)) == len(pt):
-        return pt, pf.astype(np.int32), None
-    # most groups first within each track, then the first pair per track
-    order = np.lexsort((-counts, pt))
-    tid, first = np.unique(pt[order], return_index=True)
-    tfrag = pf[order][first].astype(np.int32)
-    over = [fv != tfrag[np.searchsorted(tid, tv)]
-            for tv, fv in zip(own_t, own_f)]
-    return tid, tfrag, over
+def _hit_label_planes(su):
+    """pysupera ``hit_labels`` plane groups by (volume, plane name)."""
+    out = {}
+    for vk, vg in (su['hit_labels'].items() if 'hit_labels' in su else ()):
+        for pk, pg in vg.items():
+            out[(int(pg.attrs['volume']), _decode([pg.attrs['source']])[0])] = pg
+    return out
+
+
+def _hit_overrides(ov, hv, HL, v, e, gv, finst, row_of_id, key, comp):
+    """Per hits plane of volume ``v``: where pysupera's per-hit labels differ
+    from the group's (fragment ``gv[group]``, instance ``finst[fragment]``).
+
+    ``plane_<name>/on_sensor`` (pixel; packed bits, attr ``n``): pysupera labels
+    only hits on a sensor pixel; the others get no label. ``plane_<name>/
+    override_index / override_fragment / override_instance``: the on-sensor
+    hits (index within the plane, in the hits file's CSR order) whose pysupera
+    fragment or instance differs from their group's (groups whose hits pysupera
+    split). With both, per-hit labels equal pysupera's ``hit_labels``."""
+    for pk, pg in hv.items():
+        if not isinstance(pg, h5py.Group) or 'group_ids' not in pg:
+            continue
+        hl = HL.get((v, pk))
+        if hl is None:
+            raise ValueError(f'{key}/volume_{v}/{pk}: no pysupera hit_labels')
+        sizes = pg['group_sizes'][:].astype(np.int64)
+        gid = np.repeat(pg['group_ids'][:], sizes)
+        a, b = int(hl['offsets'][e]), int(hl['offsets'][e + 1])
+        if b - a != len(gid):
+            raise ValueError(f'{key}/volume_{v}/{pk}: {b - a} pysupera hit '
+                             f'labels, {len(gid)} hits')
+        hf = _to_rows(hl['fragment_id'][a:b], row_of_id, f'{key} hit fragment')
+        hi = _to_rows(hl['instance_id'][a:b], row_of_id, f'{key} hit instance')
+        fd = np.where(gid >= 0, gv[np.maximum(gid, 0)], -1) if len(gv) \
+            else np.full(len(gid), -1, np.int32)
+        idd = np.where(fd >= 0, finst[np.maximum(fd, 0)], -1)
+        on = hl['on_sensor'][a:b].astype(bool) if 'on_sensor' in hl \
+            else np.ones(len(gid), bool)
+        fd = np.where(on, fd, -1)
+        idd = np.where(on, idd, -1)
+        bad = np.flatnonzero((hf != fd) | (hi != idd))
+        if 'on_sensor' not in hl and not len(bad):
+            continue
+        og = ov.create_group(f'plane_{pk}')
+        if 'on_sensor' in hl:
+            d = og.create_dataset('on_sensor', data=np.packbits(on), **comp)
+            d.attrs['n'] = len(on)
+        if len(bad):
+            _create(og, 'override_index', bad.astype(np.int32), comp)
+            _create(og, 'override_fragment', hf[bad], comp)
+            _create(og, 'override_instance', hi[bad], comp)
 
 
 class _Block:
@@ -198,12 +237,19 @@ class _Block:
 
 def write_labl(supera_path, hits_path, out_path, compression='lz4',
                max_events=None, step_path=None, sensor_path=None,
-               block=100):
+               block=100, track_path=None):
     """Extract ``supera_path`` into ``out_path``, aligned to ``hits_path``.
 
     ``hits_path`` is the JAXTPC hits file pysupera read (one file per task
-    with merged inputs). It supplies ``deposit_to_group`` and is the
-    alignment check: every entry's ``event_id`` and group count must agree.
+    with merged inputs); it is the alignment check: every entry's
+    ``event_id`` and group count must agree. The JAXTPC groups
+    (``deposit_to_group``, ``group_to_track``) come from ``step_path`` when
+    that step carries them (shared-step layout; labl then holds no
+    ``deposit_to_group``, step does), else from the hits file.
+    ``group_to_track`` is label truth, carried by no point file in the
+    shared-step layout: it comes from ``track_path`` (any JAXTPC file of the
+    task with ``entry/volume/group_to_track``, e.g. the produced hits), else
+    from step or hits.
     ``step_path`` and ``sensor_path`` (the same task's JAXTPC step and sensor
     files) add ``deposit_in_window``; give both or neither. ``max_events``
     truncates (for testing); the result is then partial. pysupera is read
@@ -212,6 +258,7 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
         raise ValueError('give step_path and sensor_path together')
     win = _window(sensor_path) if sensor_path is not None else None
     st = h5py.File(step_path, 'r') if step_path is not None else None
+    tr = h5py.File(track_path, 'r') if track_path is not None else None
     if compression == 'gzip':
         comp = {'compression': 'gzip', 'compression_opts': 4}
     else:
@@ -244,6 +291,7 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
         P = _Block(su['particles'], ['id'] + sorted(
             {src for _, src in ID_COLUMNS + VALUE_COLUMNS}), p_off, block)
         G = _Block(su['groups'], ['fragment_id'], g_off, block)
+        HL = _hit_label_planes(su)     # (volume, plane name) -> pysupera group
         I = _Block(I, icols, i_off, block)
 
         cfg = out.create_group('config')
@@ -264,7 +312,13 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
         if 'issues' in su:
             for k, v in su['issues'].attrs.items():
                 cfg.attrs[f'supera_issues_{k}'] = v
+        # how pysupera labelled: its run attrs (kinematics_steps defines first/
+        # last; pixel: hit_energy, pixel_geometry) and its effective settings
+        # (config.yaml plus the readout overlay; they differ by readout)
+        for k, v in su.attrs.items():
+            cfg.attrs[f'supera_{k}'] = v
         _copy_provenance(su, cfg)
+        issues = _issues_by_event(su)
 
         dp = out.create_group('dprod/events')
         dp.attrs['order'] = 'sorted'
@@ -285,6 +339,11 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                     f'{event_ids[e]} in pysupera')
             oev = out.create_group(key)
             oev.attrs['event_id'] = int(event_ids[e])
+            if e in issues:     # e.g. OUTSIDE_READOUT_WINDOW: written empty
+                codes, msgs = zip(*issues[e])
+                oev.attrs['supera_issue_codes'] = np.array(codes, np.int32)
+                oev.attrs['supera_issue_messages'] = np.array(
+                    msgs, dtype=h5py.string_dtype())
             for c, v in id_cols.items():
                 oev.attrs[c] = int(v[e])
 
@@ -294,6 +353,41 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
             row_of_id = (sorter, ids[sorter])
 
             n_vol = sum(1 for k in hev if k.startswith('volume_'))
+            finst = _to_rows(pe['frag_inst_id'], row_of_id,
+                             f'{key} frag_inst_id')
+            # Where the groups come from: a step that carries them (the
+            # shared-step layout: deposit_to_group, group_to_track, n_groups
+            # are JAXTPC step output), else the hits file (as produced so far).
+            grp, from_step, g2t_of = {}, {}, {}
+            for v in range(n_vol):
+                sv = st[f'{key}/volume_{v}'] if (
+                    st is not None and f'{key}/volume_{v}' in st) else None
+                from_step[v] = sv is not None and 'n_groups' in sv.attrs
+                grp[v] = sv if from_step[v] else hev[f'volume_{v}']
+                srcs = ([tr[f'{key}/volume_{v}']] if tr is not None else []) \
+                    + [grp[v], hev[f'volume_{v}']]
+                g2t_src = next((x for x in srcs if 'group_to_track' in x),
+                               None)
+                if g2t_src is None:
+                    raise ValueError(
+                        f'{key}/volume_{v}: no group_to_track (shared-step '
+                        'files carry none: pass track_path)')
+                if tr is not None and int(tr[key].attrs['event_id']) != \
+                        int(event_ids[e]):
+                    raise ValueError(f'{key}: event_id differs in track_path')
+                g2t_of[v] = g2t_src['group_to_track'][:]
+                if 'n_groups' in grp[v].attrs and \
+                        int(grp[v].attrs['n_groups']) != len(g2t_of[v]):
+                    raise ValueError(
+                        f'{key}/volume_{v}: n_groups '
+                        f'{int(grp[v].attrs["n_groups"])}, group_to_track has '
+                        f'{len(g2t_of[v])}')
+                hn = hev[f'volume_{v}'].attrs.get('n_groups')
+                if from_step[v] and hn is not None and \
+                        int(hn) != int(sv.attrs['n_groups']):
+                    raise ValueError(f'{key}/volume_{v}: n_groups {int(hn)} '
+                                     f'in hits, {int(sv.attrs["n_groups"])} '
+                                     'in step')
             gfrag = _to_rows(G(e)['fragment_id'], row_of_id,
                              f'{key} groups/fragment_id')
             voffs = v_off[int(v_idx[e]):int(v_idx[e + 1])]
@@ -302,17 +396,16 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
             # (pixel). Map pysupera's volume blocks onto the hits volumes.
             vols = list(range(n_vol))
             if len(voffs) != n_vol:
-                vols = [v for v in vols
-                        if 'deposit_to_group' in hev[f'volume_{v}']]
+                vols = [v for v in vols if 'deposit_to_group' in grp[v]]
                 if len(voffs) != len(vols):
                     raise ValueError(f'{key}: {len(voffs)} pysupera volumes, '
                                      f'{len(vols)} non-empty in hits')
             bounds = dict(zip(vols, zip(
                 voffs, list(voffs[1:]) + [len(gfrag)])))
-            own_t, own_f, own_g, vol_groups = [], [], [], []
+            own_t = []
             for v in range(n_vol):
-                hv = hev[f'volume_{v}']
-                n_groups = len(hv['group_to_track'])     # == attrs n_groups
+                hv = grp[v]
+                n_groups = len(g2t_of[v])               # == attrs n_groups
                 if v in bounds:
                     gv = gfrag[int(bounds[v][0]):int(bounds[v][1])]
                 else:                                    # dropped: empty
@@ -320,49 +413,51 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 if len(gv) != n_groups:
                     raise ValueError(
                         f'{key}/volume_{v}: {len(gv)} groups in pysupera, '
-                        f'{n_groups} in hits')
-                g2t = hv['group_to_track'][:]
+                        f'{n_groups} in JAXTPC')
+                g2t = g2t_of[v]
                 own_t.append(g2t[gv >= 0])
-                own_f.append(gv[gv >= 0])
-                own_g.append(np.flatnonzero(gv >= 0))
                 ov = oev.create_group(f'volume_{v}')
-                vol_groups.append(ov)
+                # pysupera's owner of each group, as a particle row (-1:
+                # unowned). Taken as is: pysupera is the reference.
+                _create(ov, 'group_fragment', gv.astype(np.int32), comp)
+                _hit_overrides(ov, hev[f'volume_{v}'], HL, v, e, gv, finst,
+                               row_of_id, key, comp)
                 d2g = (hv['deposit_to_group'][:].astype(np.int32)
                        if 'deposit_to_group' in hv
                        else np.zeros(0, np.int32))
-                _create(ov, 'deposit_to_group', d2g, comp)
-                _create(ov, 'group_track',
-                        hv['group_to_track'][:].astype(np.int32), comp)
+                if not from_step[v]:    # step has it: the loader reads it there
+                    _create(ov, 'deposit_to_group', d2g, comp)
+                _create(ov, 'group_to_track',
+                        g2t.astype(np.int32), comp)
                 if st is not None:
                     sv = st[f'{key}/volume_{v}']
                     if int(st[key].attrs['event_id']) != int(event_ids[e]):
                         raise ValueError(f'{key}: event_id differs in step')
                     n_dep = len(sv['t0_us']) if 't0_us' in sv else 0
                     if n_dep != len(d2g):
-                        raise ValueError(f'{key}/volume_{v}: step and hits '
-                                         f'deposit counts differ')
+                        raise ValueError(f'{key}/volume_{v}: {n_dep} step '
+                                         f'deposits, {len(d2g)} in '
+                                         f'deposit_to_group')
                     _create(ov, 'deposit_in_window',
                             _in_window(sv, win['anode'][v], win) if n_dep
                             else np.zeros(0, bool), comp)
 
-            # track -> owning fragment, from the owned groups of every volume
-            tid, tfrag, over = _track_owner(own_t, own_f)
-            for v, ov in enumerate(vol_groups):
-                m = over[v] if over is not None else np.zeros(0, bool)
-                if m.any():
-                    _create(ov, 'override_group',
-                            own_g[v][m].astype(np.int32), comp)
-                    _create(ov, 'override_fragment', own_f[v][m], comp)
+            # the visible Geant4 tracks (those with an owned group), sorted:
+            # the row space group -> track points into
+            tid = np.unique(np.concatenate(own_t).astype(np.int64)) \
+                if own_t else np.zeros(0, np.int64)
             ot = oev.create_group('track')
             _create(ot, 'id', tid.astype(np.int32), comp)
-            _create(ot, 'fragment', tfrag.astype(np.int32), comp)
 
             op = oev.create_group('particle')
             for name, src in ID_COLUMNS:
                 _create(op, name, _to_rows(pe[src], row_of_id,
                                            f'{key} {src}'), comp)
             for name, src in VALUE_COLUMNS:
-                _create(op, name, pe[src], comp)
+                col = pe[src]
+                if col.dtype == np.float64:     # mass, kinematics: float32
+                    col = col.astype(np.float32)  # is ample, half the bytes
+                _create(op, name, col, comp)
 
             oi = oev.create_group('interaction')
             ie = I(e)
@@ -371,27 +466,52 @@ def write_labl(supera_path, hits_path, out_path, compression='lz4',
                 if col.dtype.kind in 'OS':
                     col = np.array(_decode(col), dtype=h5py.string_dtype())
                 _create(oi, c, col, comp)
-    if st is not None:
-        st.close()
+    for h in (st, tr):
+        if h is not None:
+            h.close()
     os.replace(out_path + '.tmp', out_path)
     return out_path
 
 
+def _issues_by_event(su):
+    """pysupera's per-event issues: {event row: [(code, message), ...]}."""
+    if 'issues' not in su or 'event' not in su['issues']:
+        return {}
+    I = su['issues']
+    out = {}
+    for ev, code, msg in zip(I['event'][:], I['code'][:],
+                             _decode(I['message'][:]) if 'message' in I
+                             else [''] * len(I['event'])):
+        out.setdefault(int(ev), []).append((int(code), str(msg)))
+    return out
+
+
 def _copy_provenance(su, cfg):
-    """The pysupera commit and config hashes, as flat attrs (whatever of the
-    dprod provenance tree the input has)."""
+    """The pysupera commit, config hashes and the effective settings, as
+    flat attrs (whatever of the dprod provenance tree the input has). The
+    settings are the task's ``config/pysupera_*`` groups (config.yaml, and the
+    reader and readout overlays that override it)."""
     if 'provenance' not in su:
         return
 
     def visit(name, obj):
+        top = name.split('/')[0]
         for k, v in obj.attrs.items():
-            if ('pysupera' in name or 'supera' in name.split('/')[0]) and (
+            if k == '_json':
+                continue
+            if ('pysupera' in name or 'supera' in top) and (
                     'commit' in k or 'dirty' in k or 'sha256' in k):
                 cfg.attrs[f'provenance/{name}/{k}'] = v
+            elif 'supera' in top and '/config/pysupera_' in f'/{name}':
+                try:
+                    cfg.attrs[f'supera_settings/{name.split("/config/", 1)[1]}/{k}'] = v
+                except (TypeError, ValueError):     # empty or odd attrs
+                    cfg.attrs[f'supera_settings/{name.split("/config/", 1)[1]}/{k}'] = str(v)
     su['provenance'].visititems(visit)
 
 
-def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel')):
+def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel'),
+                   supera_root=None):
     """One job per pysupera file of a doraemon campaign::
 
         {data_root}/supera_{ro}/{bucket}/supera_{ro}_{task}/supera_*.h5
@@ -405,10 +525,13 @@ def campaign_tasks(data_root, out_root, readouts=('wire', 'pixel')):
     (``{name}_labl_`` replaces ``{name}_hits_`` in the hits file name.)
     With ``link_inputs`` (:func:`write_campaign`), the task directory also
     gets ``hits``/``step``/``sensor`` symlinks to the JAXTPC ones, so the
-    output tree is a complete campaign tree of its own."""
+    output tree is a complete campaign tree of its own.
+
+    ``supera_root`` (default ``data_root``) is where the pysupera tree is, for a
+    JAXTPC tree that has none of its own (e.g. a shared-step rewrite)."""
     jobs = []
     for ro in readouts:
-        pat = os.path.join(data_root, f'supera_{ro}', '*', f'supera_{ro}_*',
+        pat = os.path.join(supera_root or data_root, f'supera_{ro}', '*', f'supera_{ro}_*',
                            f'supera_{ro}_*.h5')
         for su in sorted(glob.glob(pat)):
             bucket = os.path.basename(os.path.dirname(os.path.dirname(su)))
@@ -459,7 +582,7 @@ def _run_job(job):
 
 def write_campaign(data_root, out_root, readouts=('wire', 'pixel'),
                    workers=1, shard=(0, 1), overwrite=False, link_inputs=False,
-                   log=print):
+                   log=print, supera_root=None):
     """Every pysupera file of a campaign -> its labl file (see
     :func:`campaign_tasks`), ``workers`` files at a time. Files already
     written are skipped unless ``overwrite`` (output appears only when
@@ -467,7 +590,7 @@ def write_campaign(data_root, out_root, readouts=('wire', 'pixel'),
     from i, for a Slurm array. ``link_inputs`` symlinks each task's JAXTPC
     modalities beside its ``labl/`` (see :func:`campaign_tasks`). Returns the
     failures as ``{out: error}``."""
-    jobs = campaign_tasks(data_root, out_root, readouts)
+    jobs = campaign_tasks(data_root, out_root, readouts, supera_root)
     i, n = shard
     jobs = jobs[i::n]
     if link_inputs:
@@ -508,6 +631,8 @@ def main(argv=None):
         ap.add_argument('--workers', type=int, default=1)
         ap.add_argument('--shard', default='0/1', help='I/N (Slurm array)')
         ap.add_argument('--overwrite', action='store_true')
+        ap.add_argument('--supera-root', default=None,
+                        help='pysupera tree, if not under data_root')
         ap.add_argument('--link-inputs', action='store_true',
                         help='symlink hits/step/sensor beside each labl/')
         a = ap.parse_args(argv[1:])
@@ -516,6 +641,7 @@ def main(argv=None):
                                 workers=a.workers, shard=(i, n),
                                 overwrite=a.overwrite,
                                 link_inputs=a.link_inputs,
+                                supera_root=a.supera_root,
                                 log=lambda m: print(m, flush=True))
         return 1 if failed else 0
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])

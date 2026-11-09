@@ -20,8 +20,13 @@ underscore-prefixed** dict (`step_coord`, `sensor_wire`, …) + per-part `offset
 ### Install
 
 ```bash
-pip install -e /path/to/pimm-data
+pip install -e /path/to/pimm-data                                    # a checkout
+pip install "pimm-data @ git+https://github.com/OmarAlterkait/pimm-data@<rev>"   # pinned
 ```
+
+Dependencies: `numpy`, `h5py`, `hdf5plugin`, `scipy`, `torch>=2.5`. Optional:
+`SharedArray` (`cache=True`), `jax` (`dense_ops_jax`). Consumers should pin a
+revision: the API still changes between minor versions.
 
 ### Load a JAXTPC dataset
 
@@ -135,7 +140,7 @@ when labels are requested.
 | FK array | Meaning | Scope |
 |----------|---------|-------|
 | `deposit_to_group` | Step deposit → hits group ID | Per volume, in the hits file; loaded as `step.group` |
-| `group_to_track`   | Hits group → track ID | Per volume, in the hits file (supera `labl`: `group_track`) |
+| `group_to_track`   | Hits group → track ID | Per volume, in the hits file (supera `labl`: the same `group_to_track`) |
 
 All are suffixed `_v{N}` for multi-volume detectors (e.g. `deposit_to_group_v0`).
 
@@ -155,8 +160,16 @@ without labels.
 Each dataset expects sharded HDF5 files organized by modality:
 
 ```
-data_root / [modality_subdir/] / [split/] / {dataset_name}_{modality}_{shard:04d}.h5
+data_root / [modality/] / [split/] / [modality/] / {dataset_name}_{modality}_{tag}.h5
 ```
+
+Events are `event_NNN` groups (format 1, LUCiD, optical) or `entry_NNNNNN`
+groups (JAXTPC format 2). Format-2 files carry a campaign-unique `event_id` in
+`/dprod/events` and on each entry; the joint index checks it across modalities.
+Layouts no root expresses (doraemon: modality folders inside per-task folders)
+take `files=` — a glob or list of globs per dataset — instead of
+`data_root`/`split`. `runs=` (a list of run dirs, or a glob such as `'run_*'`)
+reads several run directories as one dataset.
 
 **JAXTPC** (`dataset_name='sim'`):
 
@@ -180,11 +193,12 @@ data_root/
 
 **Path resolution rules:**
 
-1. **Modality subdirectory** — `data_root/modality/` is checked first.
-   If it doesn't exist, the reader falls back to `data_root` directly.
+1. **Modality subdirectory** — `data_root/modality/` is used when it exists;
+   otherwise the reader root is `data_root` itself.
 
-2. **Split subdirectory** — Readers glob `reader_root/split/{name}_{mod}_*.h5`
-   first, falling back to `reader_root/{name}_{mod}_*.h5` if empty.
+2. **Split subdirectory** — Readers glob, in order,
+   `reader_root/split/{name}_{mod}_*.h5`, `reader_root/split/{mod}/{name}_{mod}_*.h5`,
+   then `reader_root/{name}_{mod}_*.h5`; the first that matches wins.
    `split=''` (LUCiD default) skips the split subdirectory entirely.
 
 3. **Only requested modalities must be present** — Directories for
@@ -196,9 +210,17 @@ physics `(file, event_num)` in every loaded modality. The index is the
 *intersection* of each modality's present events per shard, so an event missing
 from one modality (a production gap, a corrupt/dangling shard, or filtered out
 by `min_deposits`/`min_segments`) is dropped from **all** loaded modalities to
-keep them aligned — never silently misaligned. Shards align by sorted-glob
-position; set `strict_lengths=True` to raise on any cross-modality shard/event
-mismatch instead of aligning on the intersection.
+keep them aligned — never silently misaligned. Shards pair by identity — the
+run and the trailing filename tag (`sim_step_0054.h5` ↔ `sim_hits_0054.h5`) —
+not by glob position.
+
+Missing or partial data **raises** by default: a shard missing from one
+modality, a shard that does not open, or an event present in some modalities
+and not others. `allow_partial=True` (reading a corpus mid-build) turns these
+into a warning and reads what every modality has. An event filter is not a gap.
+Two modalities naming different `event_id`s for the same event always raises,
+as does a dataset whose files come from more than one production
+(`ds.provenance` holds what wrote each modality).
 
 ---
 
@@ -252,8 +274,10 @@ data['step'] = {
     # hits loaded or labels= set:
     'group':    (N,) int32,     # ref -> group (-1: no group)
     'qs':       (N, 1) float32, # share of its group's charge
-    # labels= only, the names asked for, each (N, 1):
-    'segment_motif': ..., 'instance_particle': ..., ...
+    # labels= only, the names asked for: (N, 1) each, except vertex (N, 3)
+    'segment_motif': ..., 'instance_particle': ..., 'vertex': ..., ...
+    '_roles': {...},           # non-default roles: group -> ('ref','group'),
+                               # instance_* -> ('label', key)
 }
 
 data['sensor'] = {
@@ -262,7 +286,12 @@ data['sensor'] = {
     'plane_id':     (M, 1) int32,
     'planes':       [str, ...],        # plane labels in plane_id order
     'readout_type': 'wire' | 'pixel',
-    'raw': {plane_label: {...}},       # per-plane arrays before merge
+    'raw': {plane_label: {...}},       # per-plane arrays before merge (wire)
+    'name': str,
+    # wire only — the dense-path COO (role 'raw', never subsampled):
+    'wire': (M,) int32, 'time': (M,) int32, 'value': (M,) float32,
+    'plane_gid': (M,) int32,
+    'shape': {plane_label: (n_wires, n_time)}, 'pedestal': {plane_label: int},
 }
 
 data['hits'] = {
@@ -276,11 +305,20 @@ data['hits'] = {
 }
 
 data['group'] = {             # hits loaded or labels= set
-    'volume': (G,) int32,        # + 'track', 'fragment' with labels=
+    'volume': (G,) int32,        # + 'track', 'fragment' (refs) with labels=
 }
-# labels= only: data['track'], data['particle'], data['interaction']
-# (pysupera's tables, docs/LABELS.md)
+# labels= only (pysupera's tables; columns in docs/LABELS.md):
+data['track']       = {'id', 'fragment', ...}           # (T,)
+data['particle']    = {'pdg', 'parent', 'ancestor', 'fragment', 'instance',
+                       'interaction', '*_sem_type', 'mass', 'start_pos', ...,
+                       # derived at load:
+                       'motif', 'pid', 'is_primary', 'momentum_start',
+                       'momentum_first'}                 # (P,)
+data['interaction'] = {'x', 'y', 'z', 'time', 'vertex' (I, 3), ...}   # (I,)
 ```
+
+Row references between tables are `('ref', table)` roles (`particle.parent`,
+`group.track`, …): collate shifts them so they stay valid across a batch.
 
 ### LUCiD sub-dicts
 
@@ -291,6 +329,7 @@ data['step'] = {
     'time':        (N, 1) float32,
     'track_idx':   (N,) int32,        # FK → labl.track
     'contained':   (N,) bool,         # step inside detector volume
+    'group_id':    (N,) int32,
     # include_physics=True (default):
     'direction':   (N, 3), 'beta_start': (N, 1), 'n_cherenkov': (N, 1),
     # present when 'labl' in modalities:
@@ -311,25 +350,29 @@ data['hits'] = {
     'sensor_idx':   (E,) int32,
     'particle_idx': (E,) int32,
     'instance':     (E,) int32,       # = particle_idx
+    'time_reco':    (E, 1) float32,
+    'digit_idx':    (E,) int32,
+    'emission_process': (E,) int8,
     # present when 'labl' in modalities:
     'segment':      (E,) int32,       # = labl.particle.category
 }
 
 data['labl'] = {
-    'event':    {'t0': () float32, 'contained': () bool},
-    'particle': {'category': (P,) int32, 'contained': (P,) bool,
-                 'ancestor_particle_idx': (P,) int32, ...},
-    'track':    {'track_id': (T,) int32, 'pdg': (T,) int32,
-                 'parent_id': (T,) int32, 'particle_idx': (T,) int32,
-                 'ancestor': (T,) int32,
-                 'ancestor_particle_idx': (T,) int32, ...},
+    'event':       {'t0': () float32, 'contained': () bool},
+    'interaction': {'source_type', 't0', 'vertex_x/y/z', 'neutrino_pdg',
+                    'neutrino_energy_MeV', 'n_primaries', 'n_particles',
+                    'contained', 'interaction_channel',
+                    'primary_{pdgs,energies,track_ids}_{data,offsets}'},  # (I,), CSR
+    'particle':    {'category': (P,) int32, 'contained': (P,) bool,
+                    'interaction_idx': (P,) int32,      # FK → interaction
+                    'ancestor_particle_idx': (P,) int32,
+                    '{,ext_}genealogy_{data,offsets}'},                    # CSR
+    'track':       {'track_id', 'pdg', 'parent_id', 'particle_idx', 'ancestor',
+                    'ancestor_particle_idx', 'interaction', 'initial_energy',
+                    'n_cherenkov'},                                       # (T,)
+    'window':      {'digit_offsets', 'window_start', 'window_end'},       # per trigger window
 }
 ```
-
-LUCiD's HDF5 also carries a `per_interaction/` group (per-neutrino-vertex
-metadata: source type, t0, vertex, neutrino PDG/energy, primaries CSR).
-The reader does not yet surface it; expose it when pile-up workflows
-need per-vertex grouping.
 
 ### Instance and segment semantics
 
@@ -419,7 +462,31 @@ dict(type='Collect', parts={
 ```
 
 `ToTensor` is **not needed** — `Collect` tensorizes (enabling fd-IPC under
-`num_workers>0`). `Collect` must be **last**.
+`num_workers>0`). `Collect` ends the per-event part of the pipeline.
+
+### After Collect: the batch tail and `EventLoader`
+
+Transforms listed after `Collect` run **per batch**, after collate: the dataset
+splits the list there (`dataset.transform` = up to `Collect`, run per event in
+the workers; `dataset.batch_transform` = the rest). Batch transforms are
+`Mix3D` (CPU, before `ToDevice`), `ToDevice(device=…)`, then device-side ones
+such as `Densify`. A transform placed on the wrong side raises when the
+pipeline is built.
+
+`EventLoader` is a `DataLoader` that runs the tail:
+
+```python
+from pimm_data import EventLoader
+loader = EventLoader(ds, batch_size=4, shuffle=True, num_workers=4, seed=0,
+                     distributed=False)
+for epoch in range(n_epochs):
+    loader.set_epoch(epoch)
+    for batch in loader:
+        ...
+```
+
+A plain `DataLoader(collate_fn=collate_fn)` also works when the pipeline has no
+tail.
 
 ### Practical configs
 
@@ -553,11 +620,10 @@ LUCiD (`wc_*`) or JAXTPC (`sim_*`) v3 datasets via one code path
   contention scaling.
 * **`transcode_codec.py`** — re-encode production HDF5 between codecs
   (gzip → blosc/zstd/lz4) to compare file size and read speed.
-* **`examples/bench_dense.py`** — times the post-collate dense tail
-  (`Densify`→`AddNoise`→`Digitize`) CPU vs GPU (`ToDevice`) on real
-  doraemon wire data (`/sdf/data/neutrino/doraemon/wire_test_00_00_02`), and verifies the output bit-exact against a manual
-  numpy scatter and a device-independent numpy oracle (`coherent_numpy=True`).
-  Measured ~29× GPU speedup; only the sparse COO crosses PCIe.
+
+(`examples/bench_dense.py` timed the old `Densify`→`AddNoise`→`Digitize` tail;
+`AddNoise`/`Digitize` moved to helix with the forward model, so it no longer
+runs.)
 
 **Codec finding:** JAXTPC loading is bound by gzip **decompression**
 (CPU/GIL-serial — scales with worker *processes*, not threads), not
@@ -605,8 +671,11 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 |---|---|---|---|
 | `data_root` | str | *(required)* | Root directory with modality subdirectories |
 | `split` | str | `'train'` | Split subdirectory. Pass `''` for flat layouts. |
+| `runs` | list/str/None | `None` | Run directories (list, or a glob such as `'run_*'`) read as one dataset |
+| `files` | dict/None | `None` | `{modality: glob or [globs]}` for every loaded modality (and `labl` with `labels=`), replacing the `data_root`/`split` search |
 | `modalities` | tuple | `('step',)` | Subset of `'step'`, `'sensor'`, `'hits'` |
 | `dataset_name` | str | `'sim'` | File prefix (matches `sim_step_*.h5`) |
+| `allow_partial` | bool | `False` | Warn instead of raising on missing/partial data (see Data layout) |
 | `volume` | int/None | `None` | Single-volume filter. `None` = all volumes. |
 | `labels` | tuple/str/None | `None` | Read `labl`; the per-point labels to write (PILArNet names, or `'all'`) |
 | `le_is_stuff` | bool | `True` | Low-energy scatters keep their class, get no fragment/particle instance |
@@ -628,6 +697,10 @@ batch['step_offset']         # tensor([N0, N0+N1, ...])  (B,), no leading 0
 | `min_segments` | int | `0` | Drop events with fewer step segments |
 | `include_physics` | bool | `True` | Load direction, beta_start, n_cherenkov |
 | `pe_threshold` | float | `0.0` | Drop hits entries with PE ≤ threshold |
+| `labels` | bool/None | `None` | Attach `segment`/`instance` to `step`/`hits` (needs `labl` in `modalities`) |
+| `label_config` | dict/None | `None` | Options for the label decoration |
+| `pmt_positions` / `pmt_positions_file` | array/str/None | `None` | PMT geometry when the shards do not carry it |
+| `allow_partial` | bool | `False` | Warn instead of raising on missing/partial data |
 | `transform` | list/None | `None` | List of transform dicts |
 
 ### MultiModalEventDataset
@@ -645,7 +718,7 @@ joint index; this layer only owns *which events exist and which split they're in
 | `sources` | list[dict] | *(required)* | Per-source `dict(name=…, label=…, config_id=…)` (subdir + integer event label) |
 | `data_root` | str/None | `None` | Root containing the source subdirs |
 | `split` | str | `'train'` | `'train'` \| `'val'` \| `'test'` \| `'all'` |
-| `holdout` | dict/None | `None` | `dict(seed=…, n_per_config=…)` — deterministic, hash-keyed partition |
+| `holdout` | dict/None | `None` | `dict(seed=…, fractions=(train, val, test))` (hash buckets) or `dict(seed=…, n_per_config=k)` (k events per source, smallest hash) |
 | `min_points` | int | `0` | Drop events with fewer points (post-aggregation) |
 | `max_events_per_source` | int | `-1` | Cap per source (`-1` = no cap) |
 | `mixture` | list/None | `None` | Per-source sampling weights |
@@ -671,7 +744,7 @@ packed `adc` (ΣL,) is a second row-space. Key params: `data_root`,
 Loads PILArNet-M directly from packed HDF5 (no per-event preprocessing). Key
 parameters: `data_root`, `split='train'`, `revision='v2'` (`'v1'`/`'v2'`/`'v3'`),
 `energy_threshold=0.0`, `min_points=1024`, `max_len=-1`,
-`remove_low_energy_scatters=False`, and event-overlay options
+`remove_low_energy_scatters=False`, `old_pid_mapping=False`, and event-overlay options
 (`overlay_n_events`, `overlay_prob`, `overlay_allow_repeats`). 5 semantic
 classes (shower/track/michel/delta/led).
 
@@ -693,9 +766,14 @@ src/pimm_data/
     optical.py         OpticalDataset (PMT light, per-chunk waveforms; label/east_west)
     multimodal.py      MultiModalEventDataset (source-mixture + holdout wrapper)
     pilarnet.py        PILArNetH5Dataset (PILArNet-M h5)
-    readers/           Per-modality HDF5 readers (incl. optical_sensor)
+    readers/           Per-modality HDF5 readers on ShardReaderBase (readers/_base.py)
     _dataset_base.py   ShardEventDataset base + modality validation
     _joint_index.py    build_joint_index — cross-modality event alignment
+    _shard_meta.py     per-shard index metadata (present events, event_id), cached
+    _provenance.py     what wrote each modality; one production per dataset
+    _holdout.py        hash-based split assignment
+    _resolve.py        JAXTPC label resolution (labl tables -> per-point labels)
+    supera_labl.py     write a JAXTPC labl file from pysupera output (CLI)
     _roles.py          per-part roles + role-driven batching primitives
     transform.py       Compose, TRANSFORMS, Collect, Apply, MultiCrop, ...
     detector_transforms.py  Apply, MultiCrop, AggregateSensorHits,
@@ -704,6 +782,8 @@ src/pimm_data/
     collate.py         collate_fn, inseg_collate_fn, mix_pairs
     loader.py          EventLoader (DataLoader + the tail after Collect)
     builder.py         DATASETS, build_dataset
+    geometry.py        plane registry for Densify (data/*.json)
+    testing.py         synthetic fixtures (make_jaxtpc_sample, make_lucid_sample, ...)
     utils/pdg.py       pdg_to_semantic(pdg, scheme)
 configs/               campaign data-loader recipes (see docs/CAMPAIGN.md)
 ```
@@ -711,7 +791,7 @@ configs/               campaign data-loader recipes (see docs/CAMPAIGN.md)
 ## Tests
 
 ```bash
-pytest                              # full suite, synthetic fixtures (~0.5 s)
+pytest                              # full suite, synthetic fixtures (~20 s)
 pytest tests/test_lucid.py          # one file
 pytest -k labl                      # filter by name
 ```
@@ -770,7 +850,7 @@ Typical runtimes (Sherlock-class shared FS, warm cache):
 
 | Scope                                    | Wall time |
 |------------------------------------------|-----------|
-| Synthetic suite (`pytest`)               | ~0.5 s    |
+| Synthetic suite (`pytest`)               | ~20 s     |
 | Single small config (e.g. `config_000006`) | ~7 s    |
 | Single large config (e.g. `config_000003`)             | ~40 s |
 | Full 18-config sweep (sequential)        | ~10 min   |

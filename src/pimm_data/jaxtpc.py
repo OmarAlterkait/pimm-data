@@ -363,12 +363,15 @@ class JAXTPCDataset(ShardEventDataset):
             data['step'] = self.step_reader.read_event(real_idx)
 
         self._build_relations(data, labl, hits_raw, hits_gid)
+        fix = data.pop('_hit_fix', None)
         if labl is not None:
             for on in ('step', 'hits'):
                 if on in data:
+                    _resolve.point_refs(data, on, fix if on == 'hits' else None)
                     _resolve.resolve(data, on, self._labels,
                                      momentum=self._momentum,
                                      le_is_stuff=self._le_is_stuff)
+                    _resolve.drop_point_refs(data[on])
         return data
 
     # ------------------------------------------------------------------
@@ -490,8 +493,9 @@ class JAXTPCDataset(ShardEventDataset):
 
         Step and hits carry nothing above the group: one ``group`` reference
         per deposit / hit entry. The group is the correspondence key the two
-        share, so it exists without labl too (the matching regime: hits gives
-        both ``deposit_to_group`` and the entries' group ids). Everything from
+        share, so it exists without labl too. Each deposit's group is read
+        from step (``deposit_to_group``), else from labl's or hits' copy (files
+        before step carried it); each hit entry's from hits' own group ids. Everything from
         the group up — its Geant4 track, the track's owning fragment, the
         particle and interaction tables — comes from labl alone.
 
@@ -501,38 +505,101 @@ class JAXTPCDataset(ShardEventDataset):
         ``track`` (ref -> ``track``, labl's visible tracks; -1 if the readout
         saw none of it) and ``fragment`` (ref -> ``particle``: the track's
         owner, gathered here so every walk starts ``group.fragment``). ``step.group`` / ``hits.group`` reference it;
-        ``step.qs`` is the deposit's share of its group's step charge (derived
-        here; it is what JAXTPC stores as ``qs_fractions``). ``particle`` and
+        ``step.qs`` is the deposit's share of its group's step charge: step's
+        ``qs_fractions`` when it carries them, else derived from step charge
+        (the same to float16). ``particle`` and
         ``interaction`` are the labl tables with their row references
         declared. Hits only cross-check group counts."""
-        if supera is None and hits_raw is None:
+        # deposit -> group from step itself (where it belongs), popped so it
+        # never reaches the step part as a column of its own
+        step_d2g, step_ng, step_qs = {}, {}, None
+        st0 = data.get('step')
+        if st0 is not None:
+            step_qs = st0.pop('qs_local', None)
+        if st0 is not None and '_n_groups' in st0:
+            step_ng = st0.pop('_n_groups')
+            gl = st0.pop('group_local')
+            if len(gl):
+                vid0 = st0['volume_id'].ravel()
+                step_d2g = {v: gl[vid0 == v] for v in np.unique(vid0).tolist()}
+        if supera is None and hits_raw is None and not step_ng:
             return
-        per_vol = {}       # v -> dict(n, track, fragment, d2g)
+        per_vol = {}       # v -> dict(n, track, ovr, d2g, inw)
+
+        def _volume(v, n, what):
+            """The volume's entry; group counts must agree across files."""
+            d = per_vol.get(v)
+            if d is None:
+                if supera is not None:
+                    return None     # labl decides which volumes exist
+                d = per_vol[v] = dict(n=n)
+            elif d['n'] != n:
+                raise ValueError(
+                    f"volume {v}: {d['n']} groups in labl/hits, {n} in "
+                    f"{what} — the files are not the same event/task")
+            return d
+
         if supera is not None:
             for k, vd in supera.items():
                 if k.startswith('v'):
                     per_vol[int(k[1:])] = dict(
-                        n=len(vd['group_track']),
-                        track=vd['group_track'],
-                        ovr=(vd.get('override_group'),
-                             vd.get('override_fragment')),
+                        n=len(vd['group_to_track']),
+                        track=vd['group_to_track'],
+                        gfrag=vd['group_fragment'],
+                        planes={c[len('plane_'):]: p for c, p in vd.items()
+                                if c.startswith('plane_')},
                         d2g=vd.get('deposit_to_group'),
                         inw=vd.get('deposit_in_window'))
         if hits_raw is not None:
-            for k, g2t in hits_raw.items():
-                if not k.startswith('group_to_track_v'):
+            counts = {int(k.rsplit('_v', 1)[1]): int(n)
+                      for k, n in hits_raw.items() if k.startswith('n_groups_v')}
+            for k, g2t in hits_raw.items():     # older files: no attr
+                if k.startswith('group_to_track_v'):
+                    v = int(k.rsplit('_v', 1)[1])
+                    if counts.setdefault(v, len(g2t)) != len(g2t):
+                        raise ValueError(
+                            f"volume {v}: hits n_groups {counts[v]}, "
+                            f"group_to_track has {len(g2t)}")
+            for v, n in counts.items():
+                d = _volume(v, n, 'hits')
+                if d is None:
                     continue
-                v = int(k.rsplit('_v', 1)[1])
-                if supera is not None and v not in per_vol:
-                    continue
-                d = per_vol.setdefault(v, dict(n=len(g2t)))
-                if d['n'] != len(g2t):
-                    raise ValueError(
-                        f"volume {v}: {d['n']} groups in labl, {len(g2t)} in "
-                        f"hits — labl and hits are not the same event/task")
-                # hits only cross-checks: track identity is labl's alone
+                hd = hits_raw.get(f'deposit_to_group_v{v}')
                 if d.get('d2g') is None:
-                    d['d2g'] = hits_raw.get(f'deposit_to_group_v{v}')
+                    d['d2g'] = hd
+                elif hd is not None and not np.array_equal(d['d2g'], hd):
+                    raise ValueError(f"volume {v}: deposit_to_group in labl "
+                                     f"differs from hits")
+        for v, n in step_ng.items():
+            d = _volume(v, n, 'step')
+            if d is None:
+                continue
+            if v in step_d2g:
+                old = d.get('d2g')
+                if old is not None and not np.array_equal(old, step_d2g[v]):
+                    raise ValueError(f"volume {v}: deposit_to_group in step "
+                                     f"differs from labl/hits")
+                d['d2g'] = step_d2g[v]
+        # Every copy of the same JAXTPC array must agree: group_to_track in
+        # hits (older files) and labl's; qs_fractions in step and
+        # hits (to float16 ulps: the readout runs round apart).
+        for v, d in per_vol.items():
+            copies = [(w, np.asarray(a)) for w, a in (
+                ('labl', d.get('track')),
+                ('hits', None if hits_raw is None
+                 else hits_raw.get(f'group_to_track_v{v}'))) if a is not None]
+            for w, a in copies[1:]:
+                if not np.array_equal(a, copies[0][1]):
+                    raise ValueError(f"volume {v}: group_to_track in {w} "
+                                     f"differs from {copies[0][0]}")
+            hq = None if hits_raw is None else \
+                hits_raw.get(f'qs_fractions_v{v}')
+            if hq is not None and step_qs is not None:
+                sq = step_qs.ravel()[st0['volume_id'].ravel() == v]
+                if len(sq) != len(hq) or not np.allclose(
+                        sq, hq, atol=2e-3, equal_nan=True):
+                    raise ValueError(f"volume {v}: qs_fractions in step "
+                                     f"differs from hits")
         if self._volume is not None:
             per_vol = {v: d for v, d in per_vol.items() if v == self._volume}
         if not per_vol:
@@ -550,7 +617,8 @@ class JAXTPCDataset(ShardEventDataset):
                  '_roles': {}}
         if supera is not None:
             # everything above the group comes from labl only: group -> track
-            # (Geant4 id -> visible-track row) -> owning fragment
+            # (Geant4 id -> visible-track row), and group -> fragment, which is
+            # pysupera's own owner of the group (-1: pysupera left it unowned)
             trk = supera['track']
             tid = np.asarray(trk['id'], np.int64)
             g2t = cat('track', np.int64)
@@ -559,15 +627,10 @@ class JAXTPCDataset(ShardEventDataset):
                 pos = np.minimum(np.searchsorted(tid, g2t), len(tid) - 1)
                 row = np.where(tid[pos] == g2t, pos, -1).astype(np.int32)
             group['track'] = row
-            group['fragment'] = _resolve._take(trk['fragment'], row, -1) \
-                .astype(np.int32)
-            for v in vols:      # groups of a track pysupera split
-                g, f = per_vol[v].get('ovr', (None, None))
-                if g is not None and len(g):
-                    group['fragment'][np.asarray(g) + base[v]] = f
+            group['fragment'] = cat('gfrag', np.int32)
             group['_roles'].update(track=('ref', 'track'),
                                    fragment=('ref', 'particle'))
-            data['track'] = dict(trk, _roles={'fragment': ('ref', 'particle')})
+            data['track'] = dict(trk, _roles={})
         data['group'] = group
 
         if 'step' in data and 'volume_id' in data['step']:
@@ -579,7 +642,15 @@ class JAXTPCDataset(ShardEventDataset):
             for v in vols:
                 d2g = per_vol[v].get('d2g')
                 mask = vid == v
-                if d2g is None or not mask.any():
+                if not mask.any():
+                    continue
+                if d2g is None:
+                    if per_vol[v]['n']:
+                        raise ValueError(
+                            f"volume {v}: {per_vol[v]['n']} groups but no "
+                            "file gives the step deposits' deposit_to_group "
+                            "(a step without groups needs the hits or labl "
+                            "that carry it)")
                     continue
                 if len(d2g) != int(mask.sum()):
                     raise ValueError(
@@ -593,7 +664,13 @@ class JAXTPCDataset(ShardEventDataset):
                 # labl's: does the deposit's charge reach the readout window
                 # (an unowned group is out of it, or under threshold)
                 st['in_window'] = inw[:, None]
-            if 'charge' in st:
+            if step_qs is not None and len(step_qs) == len(ref):
+                # JAXTPC's own qs_fractions, carried by step
+                st['qs'] = np.where(ref >= 0, step_qs.ravel(), np.nan) \
+                    .astype(np.float32)[:, None]
+            elif not len(ref):      # no deposits: same keys as any event
+                st['qs'] = np.zeros((0, 1), np.float32)
+            elif 'charge' in st:
                 # A deposit's share of its group's recombined charge — JAXTPC's
                 # qs_fractions, which is exactly this (to float16): a step
                 # quantity, the weight that splits a hit's charge over the
@@ -616,6 +693,21 @@ class JAXTPCDataset(ShardEventDataset):
             h['group'] = (np.concatenate(refs).astype(np.int32) if refs
                           else np.zeros(0, np.int32))
             h.setdefault('_roles', {})['group'] = ('ref', 'group')
+            if supera is not None:
+                # pysupera's per-hit labels where they are not the group's:
+                # off-sensor hits get none, split groups' hits their own
+                fix, o = [], 0
+                for plane, gid in zip(h['planes'], hits_gid):
+                    v, pk = int(plane.split('_')[1]), plane.split('_', 2)[2]
+                    c = per_vol.get(v, {}).get('planes', {}).get(pk)
+                    if c:
+                        if 'on_sensor' in c and len(c['on_sensor']) != len(gid):
+                            raise ValueError(f"{plane}: labl on_sensor has "
+                                             f"{len(c['on_sensor'])} hits, "
+                                             f"hits {len(gid)}")
+                        fix.append((o, len(gid), c))
+                    o += len(gid)
+                data['_hit_fix'] = fix
 
         if supera is not None:
             part = dict(supera['particle'])

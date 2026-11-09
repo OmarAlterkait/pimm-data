@@ -54,20 +54,39 @@ def test_rows_point_where_the_ids_pointed(built):
                 np.testing.assert_array_equal(
                     back(ev['particle'][name][:]),
                     su[f'particles/{src}'][off[e]:off[e + 1]])
-            # every owned group's fragment is its track's, or an override
-            g2t = np.concatenate([ev[f'volume_{v}/group_track'][:]
+            # each group's fragment is pysupera's owner, verbatim
+            g2t = np.concatenate([ev[f'volume_{v}/group_to_track'][:]
                                   for v in range(2)])
             gf = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
-            tid, tf = ev['track/id'][:], back(ev['track/fragment'][:])
+            got = np.concatenate([back(ev[f'volume_{v}/group_fragment'][:])
+                                  for v in range(2)])
+            np.testing.assert_array_equal(got, gf)
+            tid = ev['track/id'][:]
             assert np.all(np.diff(tid) > 0)
-            got = tf[np.minimum(np.searchsorted(tid, g2t), len(tid) - 1)]
-            n0 = len(ev['volume_0/group_track'])
-            for v in range(2):
-                if 'override_group' in ev[f'volume_{v}']:
-                    g = ev[f'volume_{v}/override_group'][:] + v * n0
-                    got[g] = back(ev[f'volume_{v}/override_fragment'][:])
-            np.testing.assert_array_equal(got[gf >= 0], gf[gf >= 0])
             assert set(tid) == set(g2t[gf >= 0])
+            assert 'fragment' not in ev['track']
+
+
+def test_merge_counts_kinematics_and_parent_pdg(built):
+    """Merge counts are copied; float64 kinematics are stored float32;
+    ``parent_pdg`` is derived at load and equals the parent row's PDG."""
+    from pimm_data._resolve import add_vocabulary
+    _, supera, _, labl, _ = built
+    with h5py.File(supera) as su, h5py.File(labl) as lb:
+        off = su['events/offsets'][:]
+        for e in range(N_EVENTS):
+            p = lb[f'entry_{e:06d}/particle']
+            sl = slice(off[e], off[e + 1])
+            for name, src in (('fragment_merge_count', 'frag_merge_count'),
+                              ('instance_merge_count', 'inst_merge_count')):
+                np.testing.assert_array_equal(p[name][:],
+                                              su[f'particles/{src}'][sl])
+            assert p['start_mom'].dtype == np.float32
+            assert p['mass'].dtype == np.float32
+            part = {k: p[k][:] for k in p}
+            add_vocabulary({'particle': part})
+            np.testing.assert_array_equal(
+                part['parent_pdg'], part['pdg'][part['parent']])
 
 
 def test_dataset_labels_match_supera(built):
@@ -90,31 +109,21 @@ def test_dataset_labels_match_supera(built):
             pdg = su['particles/pdg'][off[e]:off[e + 1]]
             gfrag = su['groups/fragment_id'][g_off[e]:g_off[e + 1]]
             voff = vo[vi[e]:vi[e + 1]]
-            # an owned group keeps pysupera's owner; an unowned one gets
-            # its track's (the owner of most of the track's groups)
-            from collections import Counter
-            votes = {}
-            for v in range(2):
-                g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
-                gf_v = gfrag[voff[v]:voff[v] + len(g2t_v)]
-                for t, f in zip(g2t_v[gf_v >= 0], gf_v[gf_v >= 0]):
-                    votes.setdefault(int(t), Counter())[int(f)] += 1
-            t_own = {t: max(sorted(c), key=lambda f: c[f])
-                     for t, c in votes.items()}
-            # expected per deposit, volume by volume (step concatenates them)
+            isem = su['particles/inst_sem_type'][off[e]:off[e + 1]]
+            # expected per deposit (pysupera's convention): the group's owner,
+            # -1 if pysupera left it unowned; class le for an LE fragment,
+            # else the instance's semantic type
             exp_f, exp_m, exp_i, exp_p = [], [], [], []
             for v in range(2):
                 d2g = hi[f'entry_{e:06d}/volume_{v}/deposit_to_group'][:]
                 g2t_v = hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
                 gf_v = gfrag[voff[v]:voff[v] + len(g2t_v)]
-                fid = np.array([gf_v[g] if gf_v[g] >= 0 else
-                                t_own.get(int(g2t_v[g]), -1) for g in d2g])
-                fr = np.array([row_of.get(int(i), -1) for i in fid])
+                fr = np.array([row_of.get(int(gf_v[g]), -1) for g in d2g])
                 inst = np.array([row_of[int(finst[r])] if r >= 0 else -1
                                  for r in fr])
                 exp_f.append(fr)
-                exp_m.append([EXPECT_MOTIF[fsem[r]] if r >= 0 else -1
-                              for r in fr])
+                exp_m.append([-1 if r < 0 else 4 if fsem[r] == 5
+                              else EXPECT_MOTIF[isem[r]] for r in fr])
                 exp_i.append(inst)
                 exp_p.append([pdg[i] if i >= 0 else -1 for i in inst])
             s = x['step']
@@ -124,11 +133,14 @@ def test_dataset_labels_match_supera(built):
                                           np.concatenate(exp_m))
             np.testing.assert_array_equal(s['instance_particle'][:, 0],
                                           np.concatenate(exp_i))
-            # instances: muon (row 0) -> 2, photon (1) -> 0, le (2) -> 5
+            # instances: muon (row 0) -> 2, photon (1) -> 0, le (2) -> 5;
+            # a point of an LE fragment is le whatever its instance
             pid = s['segment_pid'][:, 0]
             inst = s['instance_particle'][:, 0]
+            le = s['segment_motif'][:, 0] == 4
             for r, cls in ((0, 2), (1, 0), (2, 5)):
-                assert np.all(pid[inst == r] == cls)
+                assert np.all(pid[(inst == r) & ~le] == cls)
+            assert np.all(pid[le] == 5)
             assert np.all(pid[inst < 0] == -1)
             # primaries are the two instances that are their own parent
             prim = s['is_primary'][:, 0]
@@ -139,9 +151,20 @@ def test_dataset_labels_match_supera(built):
             assert h['instance_fragment'].shape[0] == h['coord'].shape[0]
             assert h['_roles']['group'] == ('ref', 'group')
             g = x['group']
-            np.testing.assert_array_equal(
-                h['instance_fragment'][:, 0], np.where(
-                    h['group'] >= 0, g['fragment'][h['group']], -1))
+            # hits carry pysupera's per-hit labels (hit_labels), exactly
+            hf, hi_ = [], []
+            for p in h['planes']:
+                v, pk = int(p.split('_')[1]), p.split('_', 2)[2]
+                hl = su[f'hit_labels/volume{v}/plane{pk}']
+                a, b = hl['offsets'][e], hl['offsets'][e + 1]
+                hf.append([row_of.get(int(i), -1) for i in hl['fragment_id'][a:b]])
+                hi_.append([row_of.get(int(i), -1) for i in hl['instance_id'][a:b]])
+            np.testing.assert_array_equal(h['instance_fragment'][:, 0],
+                                          np.concatenate(hf))
+            np.testing.assert_array_equal(h['instance_particle'][:, 0],
+                                          np.concatenate(hi_))
+            assert (np.concatenate(hf) != np.where(
+                h['group'] >= 0, g['fragment'][h['group']], -1)).any()
             g2t = np.concatenate([hi[f'entry_{e:06d}/volume_{v}/group_to_track'][:]
                                   for v in range(2)])
             seen = g['track'] >= 0
@@ -186,12 +209,15 @@ def test_le_is_stuff(built):
                 np.testing.assert_array_equal(t[k][~stuff], e[k][~stuff])
             for k in ('segment_motif', 'segment_pid', 'instance_interaction'):
                 np.testing.assert_array_equal(t[k], e[k])
-            # a low-energy scatter of the photon: no fragment, still the photon
+            # a low-energy scatter (pysupera's convention): le in motif and
+            # PID; as stuff it has no fragment and no particle, without
+            # le_is_stuff it keeps its host's (pysupera's include_le)
             m, p = e['segment_motif'][:, 0], e['segment_pid'][:, 0]
-            scatter = (m == 4) & (p >= 0) & (p != 5)
-            n_scatter += int(scatter.sum())
+            scatter = m == 4
+            assert (p[scatter] == 5).all()
+            n_scatter += int((scatter & (e['instance_particle'][:, 0] >= 0)).sum())
             assert (t['instance_fragment'][scatter] == -1).all()
-            assert (t['instance_particle'][scatter] >= 0).all()
+            assert (t['instance_particle'][scatter] == -1).all()
     assert n_scatter
 
 
@@ -210,8 +236,9 @@ def test_panoptic_levels_are_consistent(built):
                 for inst, cls, stuff in LEVELS.values():
                     ids = s[inst]
                     if cls is not None:
-                        for u in np.unique(ids[ids >= 0]):
-                            assert len(np.unique(s[cls][ids == u])) == 1
+                        for u in np.unique(ids[ids >= 0]):   # LE points of a
+                            c = s[cls][(ids == u) & (s[cls] != stuff)]  # host
+                            assert len(np.unique(c)) <= 1    # are le (stuff)
                         if stuff_on:
                             np.testing.assert_array_equal(
                                 s[cls] == stuff, (ids < 0) & (s[cls] >= 0))
@@ -419,8 +446,8 @@ def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
     assert 'FileNotFoundError' in next(iter(failed.values()))
     with h5py.File(got) as a, h5py.File(labl) as b:
         k = 'entry_000000'
-        np.testing.assert_array_equal(a[f'{k}/track/fragment'][:],
-                                      b[f'{k}/track/fragment'][:])
+        np.testing.assert_array_equal(a[f'{k}/track/id'][:],
+                                      b[f'{k}/track/id'][:])
         assert 'deposit_in_window' in a[f'{k}/volume_0']
     mtime = got.stat().st_mtime
     write_campaign(str(camp), str(out), ('wire',), log=lambda m: None)
@@ -435,3 +462,97 @@ def test_campaign_writes_the_jaxtpc_tree_and_resumes(built, tmp_path):
                        labels='all', modalities=('step', 'hits'))
     assert len(ds) == N_EVENTS
     assert 'segment_motif' in ds.get_data(0)['hits']
+
+
+def test_shared_step_layout_loads_the_same(built, tmp_path):
+    """The group arrays moved from hits to step (``to_shared_step``), and labl
+    written from that step: every modality combination loads array-for-array
+    what the produced layout loads, and the new labl has no deposit_to_group."""
+    from pimm_data.testing import to_shared_step
+    root, supera, hits, _, files = built
+    step = os.path.join(root, 'j000000', TASK, 'step', f'sim_step_{TASK}.h5')
+    sensor = _make_sensor_config(step, str(tmp_path / 'sensor.h5'), 1350)
+    old, new = tmp_path / 'old', tmp_path / 'new'
+    for d in (old, new):
+        d.mkdir()
+    old_labl = write_labl(supera, hits, str(old / f'sim_labl_{TASK}.h5'),
+                          step_path=step, sensor_path=sensor)
+    n_step, n_hits = to_shared_step(step, hits, str(new / f'sim_step_{TASK}.h5'),
+                                    str(new / f'sim_hits_{TASK}.h5'))
+    new_labl = write_labl(supera, n_hits, str(new / f'sim_labl_{TASK}.h5'),
+                          step_path=n_step, sensor_path=sensor,
+                          track_path=hits)
+    with h5py.File(new_labl) as lb, h5py.File(n_hits) as hh:
+        for e in (k for k in lb if k.startswith('entry_')):
+            for v in (k for k in lb[e] if k.startswith('volume_')):
+                assert 'deposit_to_group' not in lb[e][v]
+                assert 'group_to_track' in lb[e][v]
+                assert not set(hh[e][v]) & {'deposit_to_group', 'qs_fractions',
+                                            'group_to_track'}
+    lay = {'old': dict(files, labl=old_labl),
+           'new': dict(step=n_step, hits=n_hits, labl=new_labl)}
+
+    def same(a, b, path=''):
+        if isinstance(a, dict):
+            assert set(a) == set(b), path
+            for k in a:
+                if k not in ('name', 'split'):
+                    same(a[k], b[k], f'{path}/{k}')
+        elif isinstance(a, np.ndarray) and path.endswith('/qs'):
+            # derived from charge (old) vs JAXTPC's stored float16 (new)
+            np.testing.assert_allclose(a, b, atol=5e-4, err_msg=path)
+        elif isinstance(a, np.ndarray):
+            np.testing.assert_array_equal(a, b, err_msg=path)
+        else:
+            assert a == b, path
+
+    for mods in (('step',), ('hits',), ('step', 'hits')):
+        for labels in (None, 'all'):
+            if labels is None and mods == ('step',):
+                continue    # old layout: step alone has no groups
+            got = {}
+            for k, f in lay.items():
+                f = {m: f[m] for m in mods + (('labl',) if labels else ())}
+                ds = JAXTPCDataset(data_root=root, files=f, labels=labels,
+                                   modalities=mods)
+                got[k] = [ds.get_data(i) for i in range(len(ds))]
+            for a, b in zip(got['old'], got['new']):
+                same(a, b, f'{mods} {labels}')
+    # what only the new layout gives: groups and qs from step alone
+    s = JAXTPCDataset(data_root=root, files={'step': n_step},
+                      modalities=('step',)).get_data(0)['step']
+    assert (s['group'] >= 0).all() and 'qs' in s
+
+
+def test_issues_and_settings_reach_labl(built, tmp_path):
+    """pysupera's per-event issues become entry attrs; its run attrs and the
+    effective settings (config plus readout overlay) land in /config."""
+    import shutil
+    root, supera, hits, _, _ = built
+    su = shutil.copy(supera, tmp_path / 'su.h5')
+    with h5py.File(su, 'a') as f:
+        for k in [k for k in ('issues', 'provenance') if k in f]:
+            del f[k]
+        I = f.create_group('issues')
+        I.attrs['n_outside_readout_window'] = 1
+        I['event'] = np.array([1])
+        I['code'] = np.array([4], np.int32)
+        I['geant4_trackid'] = np.array([-1])
+        I['message'] = np.array([b'none of its deposits arrived inside the window'],
+                                dtype=h5py.string_dtype())
+        f.attrs['kinematics_steps'] = 'visible'
+        p = f.create_group('provenance/supera_pixel/j0/config')
+        p.create_group('pysupera_config/particle').attrs['min_pc_size'] = 5
+        p.create_group('pysupera_readout/particle').attrs['min_pc_size'] = 63
+    out = write_labl(str(su), hits, str(tmp_path / 'l.h5'), compression='gzip')
+    with h5py.File(out) as lb:
+        c = lb['config'].attrs
+        assert c['supera_kinematics_steps'] == 'visible'
+        assert c['supera_issues_n_outside_readout_window'] == 1
+        assert c['supera_settings/pysupera_config/particle/min_pc_size'] == 5
+        assert c['supera_settings/pysupera_readout/particle/min_pc_size'] == 63
+        e = sorted(k for k in lb if k.startswith('entry_'))
+        assert list(lb[e[1]].attrs['supera_issue_codes']) == [4]
+        assert 'window' in lb[e[1]].attrs['supera_issue_messages'][0]
+        assert 'supera_issue_codes' not in lb[e[0]].attrs
+

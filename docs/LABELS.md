@@ -10,8 +10,14 @@ wire and pixel.
 
 - **The sensor carries no labels.** It is the summed, thresholded readout; it does
   not record which particle produced which charge, so there is no key in it to join a
-  label to. Labels reach the readout only through `hits`, which is the sensor split
-  by group. `labels=` with only `sensor` is rejected.
+  label to. Labels reach the readout only through `hits`, the charge each group
+  puts on each channel and tick. `labels=` with only `sensor` is rejected.
+  On **pixel** the sensor is exactly the sum of hits (where the sum clears the
+  sensor threshold). On **wire** it is not: hits are the collected charge per
+  (wire, tick) before the field response, so they are unipolar and 2-7 ticks off
+  the sensor, which is after it (bipolar on U/V). Wire hits are the per-group
+  arriving charge, not a decomposition of the sensor waveform (measured on 1M
+  tasks j002500 and j004995).
 - **The JAXTPC group is the unit of truth.** Both released point clouds reach labels
   through it:
   - step deposit → `deposit_to_group` → group
@@ -20,8 +26,11 @@ wire and pixel.
   pysupera's answer, per group, is the fragment that owns it (`groups/fragment_id`).
   Everything else is a property of that fragment, its instance or its interaction.
 - **So `labl` is the hierarchy, stored once as maps:**
-  group → track → fragment → instance → interaction, plus the tables they point into.
-  It holds no per-hit or per-deposit label arrays, and computes no aggregates.
+  group → fragment (pysupera's owner, verbatim) → instance → interaction, and
+  group → track, plus the tables they point into. Per hit it stores only where
+  pysupera's `hit_labels` differ from the group's (off-sensor pixel hits, groups
+  pysupera split). It computes no aggregates. **pysupera is the reference: every
+  label is pysupera's own answer, never one we derive differently.**
 
 Grouping is identical between the wire and pixel runs: step, `deposit_to_group` and
 `group_to_track` are byte-identical. Ownership differs by readout, because pysupera
@@ -45,22 +54,43 @@ nowhere else.
 
 The rule: **a point file carries nothing above the group.** Step carries
 deposit → group, and hits carries hit entry → group. Everything from the group
-up lives in `labl`: group → track, track → fragment, the particle and interaction
+up lives in `labl`: group → track, group → fragment, the particle and interaction
 tables, and the references between them.
 
-On disk today `deposit_to_group` and `group_to_track` sit in the JAXTPC hits file.
-`labl` copies both (`deposit_to_group`, `group_track`), so step+labl and
-hits+labl are each complete.
+**The shared-step layout** (the target; the 100k subset
+`doraemon_2026_1M_lartpc/subset_100k` is written in it):
 
-- `deposit_to_group` belongs in step by the rule. When JAXTPC writes it there,
-  `labl` drops its copy.
-- `group_to_track` belongs in `labl`; hits keeps it only for older data.
+| file | per readout? | holds |
+|---|---|---|
+| step | no: one file, both readouts | deposits (all of them, in or out of either window), and per volume `deposit_to_group` (N), `qs_fractions` (N), attr `n_groups` |
+| hits | yes | entries and their group ids, attr `n_groups` |
+| sensor | yes | readout |
+| labl | yes | `group_to_track`, `deposit_in_window`, track/particle/interaction tables |
 
-`qs_fractions` is not a hits quantity. It is a deposit's share of its group's
-recombined step charge (JAXTPC `compute_qs_fractions`), and it equals
-`charge / group-sum(charge)` from the step file to float16 precision. It is the
-weight that splits a hit's charge over its group's deposits. It is derivable,
-so pimm-data computes it as `step.qs`, and no file needs to carry it.
+- Grouping is readout-independent (step, `deposit_to_group` and
+  `group_to_track` are byte-identical between the wire and pixel runs;
+  `qs_fractions` to 1 float16 ulp), so it is JAXTPC step output, written once.
+- `group_to_track` is label truth (which Geant4 track made the group) and no
+  point file carries it: self-supervised use of step or hits needs at most the
+  group id, as the key matching deposits to hit entries. It lives in `labl` as
+  `group_to_track`. JAXTPC step has no per-deposit track id, so the labl writer
+  takes it from another file (`write_labl(track_path=...)`; for the 1M campaign,
+  the produced hits). Where it should come from in production is open:
+  pysupera writing each group's track id beside `groups/fragment_id`, or
+  edep-sim's per-step `track_id` (JAXTPC step rows are edep-sim's `pstep` rows
+  in order, and it reproduces `group_to_track` for every group measured).
+- `qs_fractions` (a deposit's share of its group's charge, `charge /
+  group-sum(charge)` to float16) is kept in step as JAXTPC writes it; pimm-data
+  derives it from step charge only for files without it. Groups whose charge is
+  all zero (6% of groups: zero-charge photon/neutron steps) have qs 0.
+- Out-of-window deposits stay in step. The pixel window is inside the wire
+  window, so only deposits outside the wire window are outside both; they are
+  kept for the light truth. `labl.deposit_in_window` marks them per readout.
+
+Files produced so far (all of the 1M campaign) have the three group arrays in
+hits instead, and `labl` also carries a copy of `deposit_to_group` so step+labl
+works without hits. pimm-data reads both layouts; when two files carry the same
+array it checks they agree.
 
 **Track information is implicit in today's point files.** It shows in their
 ordering (1M task 0, verified):
@@ -147,11 +177,11 @@ group is the shared key, label-free. Nothing above the group appears. There is n
 | Wire `hit_labels` (fragment, instance, is_le) equal the group-derived labels on every hit | `hit_labels` is redundant |
 | Pixel `hit_labels` differ only by `on_sensor = false` (13–15% of hits) and about 10 hits/event in groups that straddle a fragment boundary, which `groups/` resolves by majority | `on_sensor` is a hits-vs-sensor fact, not a label; the group label is the definition |
 | `groups/is_le` == (owner's `frag_sem_type` == kLEScatter) on every owned group; 0 on unowned | `is_le` is redundant (true since 4.0: LE is per fragment) |
-| Every owner is a fragment row; every fragment row's `frag_inst_id` resolves to an instance row; every instance row is also a fragment row | group → fragment → instance needs no point ranges |
+| Every owner is a fragment row; every fragment row that owns a group has a `frag_inst_id` that resolves to an instance row (11 fragment rows in 300 events per readout have -1: LE photons that own nothing); every instance row is also a fragment row | group → fragment → instance needs no point ranges |
 | `parent_pdg` == `pdg[parent_id]` on every row | `parent_pdg` is redundant |
 | All id references (`parent_id`, `ancestor_id`, `frag_parent_id`, `inst_parent_id`, `frag_inst_id`, `groups/fragment_id`) resolve to rows of the same event | they can be stored as row indices |
 | Instance rows with `geant4_parent_trackid == -1` are exactly those with `parent_id == id` | "primary" has one definition |
-| Rows that are neither fragment nor instance are almost all `kDelta` delta rays merged into their track (plus a few ancestry links) | they stay: they are the delta-ray labels and the hierarchy |
+| Rows that are neither fragment nor instance are almost all `kDelta` delta rays merged into their track (plus a few ancestry links) | they stay as the hierarchy. No label the loader emits points at them: a merged delta's points carry its host's fragment; the row is reachable only by `group.track` == `particle.geant4_trackid` |
 
 ## Contents
 
@@ -163,13 +193,21 @@ same `entry_NNNNNN` entries in the same order, the same `event_id` / `job_id` /
 ```
 entry_NNNNNN/
   volume_{v}/
-    group_track       (G_v,) int32   Geant4 track id of group g (copy of hits
-                                     group_to_track)
-    deposit_to_group  (N_v,) int32   copy from hits; the step -> group bridge
+    group_to_track       (G_v,) int32   Geant4 track id of group g (JAXTPC
+                                     group_to_track, from step or hits)
+    deposit_to_group  (N_v,) int32   ONLY when step lacks it (produced layout):
+                                     copy from hits, the step -> group bridge
     deposit_in_window (N_v,) bool    the deposit's charge arrives inside the
                                      readout window (needs --step --sensor)
-  track/      (T rows)  each visible Geant4 track: id (sorted), fragment (the
-                        particle row owning it) <- owned groups of groups/fragment_id
+    group_fragment    (G_v,) int32   pysupera groups/fragment_id as a particle row
+                                     (-1: pysupera left the group unowned)
+    plane_<name>/                    per hits plane, only where needed:
+      on_sensor       packed bits    pixel: hits on a sensor pixel (attr n); the
+                                     others get no label, as in hit_labels
+      override_index / override_fragment / override_instance
+                                     on-sensor hits whose hit_labels differ from
+                                     their group's (groups pysupera split)
+  track/      (T rows)  id: the visible Geant4 tracks (owning a group), sorted
   particle/   (P rows)  pysupera particles: fragments/instances, their links,
                         Geant4 ids, kinematics, interaction ref
   interaction/(I rows)  pysupera inter/: one row per interaction it kept
@@ -181,23 +219,12 @@ what we label, and anything pysupera adds later is picked up by extending the
 column lists. Interactions are separated by row (`particle.interaction`); which
 generator made each one is pysupera's to add, and `interaction/` gains it then.
 
-### Why track → fragment, and not group → fragment or track → particle
+### Group → fragment is pysupera's, verbatim
 
-Measured on 1M task 0 (20 events per readout):
-
-| map | exact? |
-|---|---|
-| group → track | yes, by construction (JAXTPC) |
-| track → fragment | all but ~1 track in 10⁶: over 200 events, 2 (wire) / 3 (pixel) tracks of ~2M are split by pysupera between two fragments (7 / 20 groups). `track.fragment` is the owner of most of the track's groups; the others are listed per volume as `override_group` / `override_fragment`, so labels stay exact |
-| fragment → instance → interaction | yes, in the particle table (read the instance's `interaction`: 19 pixel LE fragment rows disagree with their instance) |
-| track → particle row (`geant4_trackid`) | no: 26% / 39% of visible tracks have no row (merged into another fragment, mostly LE and shower e/γ); 6% have a row that is not their owner (delta rays merged into the parent); 9 pixel tracks have two rows |
-
-So a group's fragment is `track.fragment[group.track]`, about 10k rows per event
-instead of about 56k groups. Hit labels are unchanged by it (0 differences on both
-readouts). Step labels differ only in groups pysupera left unowned while their track
-is owned elsewhere: 3.8% (wire) / 5.1% (pixel) of deposits, 99% of them out of the
-window (`deposit_in_window` masks those, and JAXTPC will drop them). The remaining
-0.05% are in-window groups under threshold, now labelled with their track's fragment.
+`group_fragment` is `groups/fragment_id`, ids mapped to rows. An earlier version
+compressed it to track → fragment with per-group overrides and gave unowned groups
+their track's fragment; that labelled 3.0% (wire) / 4.6% (pixel) of deposits that
+pysupera leaves unowned, so it was dropped: pysupera's ownership is the label.
 
 ### Producing it
 
@@ -215,10 +242,10 @@ goes away.
 Size, 1M task 0: about 0.9 MB/event; writing takes about 2 minutes per 1000-event
 task.
 
-`deposit_to_group` is the one non-pysupera array. Step+labl must work without hits,
-and the step file does not carry it. The alternative is for JAXTPC to write it into
-step, since grouping is a step property and readout-independent; that change is not
-ours to make.
+The writer takes the JAXTPC groups from the step file when it carries them
+(shared-step layout; it then writes no `deposit_to_group`), else from hits. Rerun
+on the shared-step task 0 it reproduces the produced `labl` minus
+`deposit_to_group`.
 
 ### Dropped, and why
 
@@ -227,9 +254,8 @@ ours to make.
 | `points/*`, every `*pc_start/le_start/end` | voxels; no voxels |
 | `hit_labels/*` | derivable from the group map (above); `on_sensor` is not a label |
 | `groups/is_le` | derivable from `fragment_sem_type` |
-| `parent_pdg` | derivable from `parent` |
+| `parent_pdg` | derivable from `parent`; pimm-data gathers it as `particle.parent_pdg` |
 | `id`, `inter/interaction_id` | replaced by row position |
-| `frag_merge_count`, `inst_merge_count` | pysupera bookkeeping, not truth |
 | `inter/part_*`, `inter/pc_*` | point/particle ranges; `particle.interaction` covers it |
 | `inter/reaction` | empty in 4.1 |
 | `events/input`, `input_event`, `jaxtpc_entry`, `inputs/` | pysupera's own provenance; `labl` is entry-aligned with JAXTPC by construction |
@@ -239,10 +265,14 @@ ours to make.
 
 Everything a model or metric uses is a gather; nothing new is stored:
 
-- `segment_motif` = `fragment_sem_type[track.fragment[group.track]]`, mapped to the shared
-  motif vocabulary (shower, track, michel, delta, le)
-- `instance_particle` = `fragment_instance[...]`
-- `segment_pid` = `pdg[instance]`, mapped to the PID classes
+Each point's fragment is its group's pysupera owner (per hit, pysupera's
+`hit_labels`); its instance is that fragment's `fragment_instance`. Then, as
+pysupera's own `torchdata` does:
+- `segment_motif` = le for a point of an LE fragment, else the instance's semantic
+  type (`instance_sem_type`), mapped to (shower, track, michel, delta, le)
+- `instance_particle` = the instance
+- `segment_pid` = le for a point of an LE fragment, else `pdg[instance]` mapped to
+  the PID classes (an LE instance is le)
 - `instance_interaction` = `interaction[instance]`
 - `momentum` / `vertex` / `is_primary` = `particle` and `interaction` columns
 - object-level targets come straight from the tables
@@ -263,6 +293,48 @@ the window from the sensor config. It is the one computed array in `labl`; it go
 away once JAXTPC stops saving out-of-window deposits. pimm-data exposes it as
 `step.in_window`. On wire, a group is owned exactly when it has a hit.
 
+## pysupera semantics (audited against its source, dab92d8, and on 300 events per readout)
+
+- **Wire and pixel were labelled with different settings.** The pixel run loads
+  `conf/readout/jaxtpc_pixel.yaml` over `config.yaml`: `min_pc_size` 63 (wire 5),
+  `distance_threshold` 6.2 (5.2), `delta_min_standoff` 8 mm (0, so pixel deltas
+  within 8 mm of their track are merged into it), `check_group_ownership` off
+  (on), and `point_source` hits (wire: deposits). So the LE and delta classes are
+  not defined alike in the two readouts. `labl/config` now records the effective
+  settings (`supera_settings/...`) and pysupera's run attrs (`supera_*`:
+  `kinematics_steps`, `point_source`, pixel `hit_energy`, `pixel_geometry`).
+- **Merge counts** (`fragment_merge_count`, `instance_merge_count`) count pysupera
+  particles in the fragment/instance: split pieces of one Geant4 track and buried
+  deltas count; -1 off that level. Not derivable from labl, so kept.
+- **Kinematics**: `*_pos` is (x, y, z, t) in mm and ns, `*_mom` is (px, py, pz, E)
+  in MeV with E the total energy. `start`/`end` are the Geant4 particle's own;
+  `first`/`last` exist on instance rows only and are the earliest / latest
+  *visible* step (a step whose group left a hit), NaN on instances with no visible
+  step. `last_*` is NaN on shower instances.
+- **Interactions are per readout.** pysupera keeps an edep-sim vertex exactly when
+  one of its groups is owned, then renumbers, so `interaction` rows (and
+  `instance_interaction`) are not comparable between readouts: 89% of events keep
+  different sets (pixel's is almost always a subset of wire's). `vertex_id` is
+  the shared key. `interaction.time` is ns. `particle.interaction_type` is the
+  particle's Geant4 creation process (edep-sim `InteractionType`), not a property
+  of the interaction.
+- **Issues**: per-event pysupera issues are on the labl entry
+  (`supera_issue_codes`, `supera_issue_messages`). In the campaign: 4 pixel events,
+  all OUTSIDE_READOUT_WINDOW, written empty; none on wire.
+- **Split-piece rows** (`defragment`): `geant4_parent_trackid` equals the row's
+  own track id, because the piece's parent is the original particle.
+
+Labels follow pysupera exactly (decided 2026-11-05: pysupera is the reference):
+- a group pysupera leaves unowned has no fragment, whatever its track;
+- pixel hits off the sensor have no label (`hit_labels` -1);
+- hits of groups pysupera split carry pysupera's per-hit fragment and instance;
+- class = the instance's semantic type, or le for an LE fragment (motif and PID);
+- interaction = the instance's (81 pixel fragments, 78 LE, sit in an instance of
+  another interaction; their own particle row keeps their true vertex);
+- `le_is_stuff=False` is pysupera's `include_le` exactly (LE points keep their
+  host's instance and interaction); `True` (default) also drops their fragment
+  and particle ids.
+
 ## Implemented, and checked on real data
 
 On 1M task 0 (20 events per readout), the per-hit labels `JAXTPCDataset` builds from
@@ -278,8 +350,10 @@ table), and `instance` becomes the particle row.
 ## Still needed from producers
 
 1. **A doraemon `labl` stage.** It does not exist in the 1M campaign.
-2. **JAXTPC:** drop out-of-window deposits (then `deposit_in_window` goes); write
-   `deposit_to_group` into step.
+2. **JAXTPC:** the shared-step layout above: one step per task for both
+   readouts, carrying `deposit_to_group`, `qs_fractions`, `group_to_track` and
+   `n_groups`; hits without those three arrays. Also per-step momentum `p`
+   (edep-sim has it) for the momentum targets.
 3. **pysupera (later):** the generator source per interaction.
 
 ## Open

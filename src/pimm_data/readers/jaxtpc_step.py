@@ -94,6 +94,7 @@ class JAXTPCStepReader(ShardReaderBase):
         evt = f[event_key]
 
         vol_arrays = []
+        n_groups = {}       # volume -> group count, when step carries groups
 
         if n_volumes > 1:
             for v in range(n_volumes):
@@ -103,6 +104,8 @@ class JAXTPCStepReader(ShardReaderBase):
                 if vk not in evt:
                     continue
                 vg = evt[vk]
+                if 'n_groups' in vg.attrs:
+                    n_groups[v] = int(vg.attrs['n_groups'])
                 n = int(vg.attrs.get('n_actual', 0))
                 if n == 0:
                     continue
@@ -112,17 +115,34 @@ class JAXTPCStepReader(ShardReaderBase):
                 n = evt['positions'].shape[0]
                 vol_arrays.append(self._read_volume_flat(evt, n, 0))
 
-        if not vol_arrays:
-            return self._empty_dict()
-
-        return self._concat_volumes(vol_arrays)
+        # Groups are all-or-none per file: every volume with deposits carries
+        # them, or none does (a mixture cannot be concatenated in step order).
+        has = [('group_local' in d) for d in vol_arrays]
+        if any(has) and not all(has):
+            raise ValueError(f'{event_key}: step carries deposit_to_group in '
+                             'some volumes only')
+        if not all('qs_local' in d for d in vol_arrays):
+            for d in vol_arrays:        # partial qs: the dataset derives it
+                d.pop('qs_local', None)
+        out = (self._concat_volumes(vol_arrays) if vol_arrays
+               else self._empty_dict())
+        if 'group_local' in out and not n_groups:
+            raise ValueError(f'{event_key}: step has deposit_to_group but no '
+                             'n_groups attrs')
+        if n_groups:
+            # The dataset turns these into ``step.group`` and pops them.
+            out['_n_groups'] = n_groups
+            out.setdefault('group_local', np.zeros(0, np.int32))
+        return out
 
     def _read_volume(self, vg, n, vol_idx):
         """Read physics arrays from a volume group.
 
-        Step carries only deposit-level physics. Instance identifiers
-        (group_ids, deposit→group FK) live in hits; per-track metadata
-        (pdg, interaction, ancestor) lives in labl.
+        Step carries deposit-level physics and, when the file has it, each
+        deposit's JAXTPC group (``deposit_to_group``, volume-local; the
+        dataset makes it the event-wide ``step.group``) and its share of the
+        group's charge (``qs_fractions``). Everything above the group lives in
+        labl.
         """
         step = float(vg.attrs['pos_step_mm'])
         origin = np.array([vg.attrs['pos_origin_x'],
@@ -145,6 +165,21 @@ class JAXTPCStepReader(ShardReaderBase):
             for key in ('charge', 'photons'):
                 if key in vg:
                     d[key] = vg[key][:].astype(np.float32)
+        if 'deposit_to_group' in vg:
+            d['group_local'] = vg['deposit_to_group'][:].astype(np.int32)
+        elif 'n_groups' in vg.attrs:
+            if int(vg.attrs['n_groups']):
+                raise ValueError(f'{vg.name}: {int(vg.attrs["n_groups"])} '
+                                 'groups but no deposit_to_group')
+            d['group_local'] = np.full(n, -1, np.int32)   # no groups at all
+        if 'qs_fractions' in vg:
+            d['qs_local'] = vg['qs_fractions'][:].astype(np.float32)
+        elif 'group_local' in d and (d['group_local'] < 0).all():
+            d['qs_local'] = np.full(n, np.nan, np.float32)
+        for k in ('group_local', 'qs_local'):
+            if k in d and len(d[k]) != n:
+                raise ValueError(f'{vg.name}: {len(d[k])} {k[:-6]} entries, '
+                                 f'{n} deposits')
 
         return d
 
