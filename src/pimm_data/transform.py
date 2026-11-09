@@ -993,6 +993,78 @@ class ElasticDistortion(object):
 
 
 @TRANSFORMS.register_module()
+class Voxelize(object):
+    """Voxelize 3D points (step deposits) on a fixed grid, keeping every point:
+    one row per occupied cell, as pysupera builds its voxels (``torchdata``).
+
+    - ``coord``: the cell centre, ``(floor((x - origin) / grid_size) + 0.5) *
+      grid_size + origin``; ``grid_coord`` the cell index (``return_grid_coord``).
+    - ``energy`` (and the other ``sum_keys`` present): summed over the cell.
+    - every other per-point key (labels, ``group``, ...): the cell's winning
+      point, pysupera's rule: highest class priority track > shower > delta >
+      michel > le > unlabelled (from ``segment_motif``), then earliest
+      ``time_key``.
+
+    pysupera's grid: ``grid_size=3`` (mm), ``origin=-2160`` (mm). Use
+    ``Apply(on='step', ...)``, before any coordinate normalisation.
+    """
+
+    # segment_motif (shower 0, track 1, michel 2, delta 3, le 4) -> pysupera
+    # priority rank (track 0, shower 1, delta 2, michel 3, le 4); unlabelled 5
+    _RANK_OF_MOTIF = np.array([1, 0, 3, 2, 4])
+
+    def __init__(self, grid_size=3.0, origin=-2160.0, sum_keys=("energy",),
+                 time_key="t0_us", class_key="segment_motif", return_grid_coord=True):
+        self.grid_size = grid_size
+        self.origin = origin
+        self.sum_keys = tuple(sum_keys)
+        self.time_key = time_key
+        self.class_key = class_key
+        self.return_grid_coord = return_grid_coord
+
+    def __call__(self, data_dict):
+        coord = np.asarray(data_dict["coord"], np.float64)
+        n, dim = coord.shape
+        size = np.broadcast_to(np.asarray(self.grid_size, np.float64), (dim,))
+        org = np.broadcast_to(np.asarray(self.origin, np.float64), (dim,))
+        cell = np.floor((coord - org) / size).astype(np.int64)
+        if n == 0:
+            if self.return_grid_coord:
+                data_dict["grid_coord"] = cell
+            return data_dict
+        _, inv = np.unique(cell, axis=0, return_inverse=True)
+        inv = inv.ravel()
+        n_vox = int(inv.max()) + 1
+        if self.class_key in data_dict:
+            m = np.asarray(data_dict[self.class_key]).ravel()
+            ok = (m >= 0) & (m < len(self._RANK_OF_MOTIF))
+            rank = np.where(ok, self._RANK_OF_MOTIF[np.clip(m, 0, len(self._RANK_OF_MOTIF) - 1)],
+                            len(self._RANK_OF_MOTIF))
+        else:
+            rank = np.zeros(n, np.int64)
+        t = (np.asarray(data_dict[self.time_key], np.float64).ravel()
+             if self.time_key in data_dict else np.zeros(n))
+        order = np.lexsort((t, rank, inv))
+        sorted_inv = inv[order]
+        winner = order[np.r_[True, sorted_inv[1:] != sorted_inv[:-1]]]   # cell k -> its winner
+        sums = {}
+        for k in self.sum_keys:
+            if k in data_dict and len(data_dict[k]) == n:
+                v = np.asarray(data_dict[k])
+                sums[k] = np.bincount(inv, weights=v.reshape(n).astype(np.float64),
+                                      minlength=n_vox).astype(v.dtype).reshape((n_vox,) + v.shape[1:])
+        data_dict = index_operator(data_dict, winner)       # every per-point key -> the winner's
+        for k, v in sums.items():
+            data_dict[k] = v
+        data_dict["coord"] = ((cell[winner] + 0.5) * size + org).astype(np.float32)
+        if self.return_grid_coord:
+            data_dict["grid_coord"] = cell[winner]
+            if "grid_coord" not in data_dict["index_valid_keys"]:
+                data_dict["index_valid_keys"].append("grid_coord")
+        return data_dict
+
+
+@TRANSFORMS.register_module()
 class GridSample(object):
     def __init__(
         self,
