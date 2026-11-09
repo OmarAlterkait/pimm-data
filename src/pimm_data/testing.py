@@ -517,7 +517,9 @@ def make_supera(hits_path, out_path, seed=0):
                 cols['pdg'].append(pdg)
                 cols['sem_type'].append(sem)
                 cols['frag_sem_type'].append(sem if fr else -1)
-                cols['inst_sem_type'].append(SUPERA_FRAGMENTS[inst][1])
+                # pysupera sets inst_sem_type on instance rows only (-1 on a
+                # fragment row that is not its own instance, as in 1M)
+                cols['inst_sem_type'].append(SUPERA_FRAGMENTS[r][1] if r < 3 else -1)
                 cols['interaction_type'].append(r)
                 cols['geant4_trackid'].append(r + 1)
                 cols['geant4_parent_trackid'].append(-1 if r < 2 else 1)

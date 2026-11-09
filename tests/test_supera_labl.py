@@ -122,8 +122,11 @@ def test_dataset_labels_match_supera(built):
                 inst = np.array([row_of[int(finst[r])] if r >= 0 else -1
                                  for r in fr])
                 exp_f.append(fr)
+                # the instance's type is read on the instance row (pysupera
+                # leaves inst_sem_type -1 on a fragment that is not its own
+                # instance)
                 exp_m.append([-1 if r < 0 else 4 if fsem[r] == 5
-                              else EXPECT_MOTIF[isem[r]] for r in fr])
+                              else EXPECT_MOTIF[isem[i]] for r, i in zip(fr, inst)])
                 exp_i.append(inst)
                 exp_p.append([pdg[i] if i >= 0 else -1 for i in inst])
             s = x['step']

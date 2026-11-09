@@ -110,9 +110,15 @@ def add_vocabulary(data):
         rows = np.arange(len(part['parent']))
         le = np.asarray(part['fragment_sem_type']) == SEM_LE
         part['is_le'] = le.astype(np.int32)
+        # the instance's semantic type, read on the INSTANCE row: pysupera
+        # sets instance_sem_type only on instance rows (-1 elsewhere), and a
+        # shower fragment merged into a shower instance is not one
+        fi = np.asarray(part['fragment_instance'])
+        isem = np.asarray(part['instance_sem_type'])
+        isem_of_frag = np.where(fi >= 0, isem[np.maximum(fi, 0)], -1) \
+            if len(fi) else isem
         part['motif'] = np.where(le, MOTIF_NAMES.index('le'),
-                                 motif_of_sem(part['instance_sem_type'])) \
-            .astype(np.int32)
+                                 motif_of_sem(isem_of_frag)).astype(np.int32)
         part['pid'] = pid_of(part['pdg'], part['instance_sem_type'])
         par = np.asarray(part['parent'])
         part['is_primary'] = (par == rows).astype(np.int32)
