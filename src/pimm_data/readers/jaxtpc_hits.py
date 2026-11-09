@@ -158,11 +158,24 @@ class JAXTPCHitsReader(JAXTPCReadoutReader):
 
         Plus (both readouts):
             group_to_track_v{N}, deposit_to_group_v{N}, qs_fractions_v{N}
+            (older files only), n_groups_v{N}, and ``_group_id_space``
+            ('volume' or 'plane': whether ``group_id`` is the volume's group
+            id or the plane's own)
         """
         f, event_key = self._locate_event(idx)
         evt = f[event_key]
 
         data_dict = {}
+        # Group-id space of the planes' group_ids: 'volume' (as produced: one id
+        # space per volume, shared by its planes and by step's deposit_to_group)
+        # or 'plane' (each plane numbered on its own; labl's plane_<P>/group
+        # maps a plane id to its volume group).
+        space = f.attrs.get('group_id_space', 'volume')
+        space = space.decode() if isinstance(space, bytes) else str(space)
+        if space not in ('volume', 'plane'):
+            raise ValueError(f"{f.filename}: group_id_space={space!r}; "
+                             "expected 'volume' or 'plane'")
+        data_dict['_group_id_space'] = space
 
         for vol_key in evt:
             vol = evt[vol_key]

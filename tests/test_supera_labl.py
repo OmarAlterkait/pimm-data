@@ -556,3 +556,79 @@ def test_issues_and_settings_reach_labl(built, tmp_path):
         assert 'window' in lb[e[1]].attrs['supera_issue_messages'][0]
         assert 'supera_issue_codes' not in lb[e[0]].attrs
 
+
+def test_plane_local_layout_loads_the_same(built, tmp_path):
+    """Hits numbered per plane (``to_plane_local``: volume groups renumbered,
+    blocks shuffled, plane ids 0..G-1, labl plane maps): with labl every
+    deposit and hit gets the labels the shared-step layout gives it (hits as a
+    multiset, since their order changed); without labl, hits carry only the
+    plane-local id and no reference into ``group``."""
+    from pimm_data.testing import to_plane_local, to_shared_step
+    root, supera, hits, _, files = built
+    step = os.path.join(root, 'j000000', TASK, 'step', f'sim_step_{TASK}.h5')
+    sensor = _make_sensor_config(step, str(tmp_path / 'sensor.h5'), 1350)
+    a, b = tmp_path / 'a', tmp_path / 'b'
+    for d in (a, b):
+        d.mkdir()
+    s1, h1 = to_shared_step(step, hits, str(a / f'sim_step_{TASK}.h5'),
+                            str(a / f'sim_hits_{TASK}.h5'))
+    l1 = write_labl(supera, h1, str(a / f'sim_labl_{TASK}.h5'),
+                    step_path=s1, sensor_path=sensor, track_path=hits)
+    s2, h2, l2 = to_plane_local(s1, h1, l1, str(b / f'sim_step_{TASK}.h5'),
+                                str(b / f'sim_hits_{TASK}.h5'),
+                                str(b / f'sim_labl_{TASK}.h5'), seed=3)
+    keys = None
+    for mods in (('step',), ('hits',), ('step', 'hits')):
+        dsa = JAXTPCDataset(data_root=root, labels='all', modalities=mods,
+                            files={m: f for m, f in dict(step=s1, hits=h1, labl=l1).items()
+                                   if m in mods + ('labl',)})
+        dsb = JAXTPCDataset(data_root=root, labels='all', modalities=mods,
+                            files={m: f for m, f in dict(step=s2, hits=h2, labl=l2).items()
+                                   if m in mods + ('labl',)})
+        assert len(dsa) == len(dsb)
+        for i in range(len(dsa)):
+            x, y = dsa.get_data(i), dsb.get_data(i)
+            for part in mods:
+                px, py = x[part], y[part]
+                keys = sorted(k for k in px if k.startswith(
+                    ('segment', 'instance', 'is_primary', 'momentum', 'vertex')))
+                assert keys and keys == sorted(k for k in py if k in keys or k.startswith(
+                    ('segment', 'instance', 'is_primary', 'momentum', 'vertex'))), part
+                cols = [px['coord'], px['energy']] + [px[k] for k in keys]
+                if part == 'hits':
+                    cols.insert(0, px['plane_id'])
+                rows_x = np.column_stack([np.asarray(c, np.float64).reshape(len(c), -1)
+                                          for c in cols])
+                cols = [py['coord'], py['energy']] + [py[k] for k in keys]
+                if part == 'hits':
+                    cols.insert(0, py['plane_id'])
+                rows_y = np.column_stack([np.asarray(c, np.float64).reshape(len(c), -1)
+                                          for c in cols])
+                if part == 'step':      # rows unchanged
+                    np.testing.assert_array_equal(rows_x, rows_y, err_msg=f'{mods} {i}')
+                else:
+                    sx = rows_x[np.lexsort(rows_x.T[::-1])]
+                    sy = rows_y[np.lexsort(rows_y.T[::-1])]
+                    np.testing.assert_array_equal(sx, sy, err_msg=f'{mods} {i}')
+                    assert not (py['group'] == px['group']).all()
+    # without labl: no cross-plane / step key for hits, only the plane-local id
+    y = JAXTPCDataset(data_root=root, files=dict(step=s2, hits=h2),
+                      modalities=('step', 'hits')).get_data(0)
+    assert 'group' not in y['hits'] and 'group' not in y['hits'].get('_roles', {})
+    assert len(y['hits']['plane_group']) == len(y['hits']['coord'])
+    assert y['step']['_roles']['group'] == ('ref', 'group')
+    # labl without a plane map on plane-local hits is refused
+    import shutil
+    (tmp_path / 'nomap').mkdir()
+    l3 = str(tmp_path / 'nomap' / f'sim_labl_{TASK}.h5')
+    shutil.copyfile(l2, l3)
+    with h5py.File(l3, 'a') as lb:
+        e = next(k for k in lb if k.startswith('entry_'))
+        v = next(k for k in lb[e] if k.startswith('volume_'))
+        p = next(k for k in lb[e][v] if k.startswith('plane_'))
+        del lb[e][v][p]['group']
+    clear_cache()
+    with pytest.raises(ValueError, match='plane-local'):
+        ds = JAXTPCDataset(data_root=root, labels='all', modalities=('hits',),
+                           files=dict(hits=h2, labl=l3))
+        [ds.get_data(i) for i in range(len(ds))]

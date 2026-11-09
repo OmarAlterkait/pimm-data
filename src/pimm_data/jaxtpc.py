@@ -685,14 +685,44 @@ class JAXTPCDataset(ShardEventDataset):
 
         if 'hits' in data:
             h = data['hits']
-            refs = []
-            for plane, gid in zip(h['planes'], hits_gid):
-                v = int(plane.split('_')[1])
-                refs.append(np.where(gid >= 0, gid + base[v], -1)
-                            if v in base else np.full(len(gid), -1))
-            h['group'] = (np.concatenate(refs).astype(np.int32) if refs
-                          else np.zeros(0, np.int32))
-            h.setdefault('_roles', {})['group'] = ('ref', 'group')
+            if hits_raw.get('_group_id_space', 'volume') == 'plane':
+                # Each plane is numbered on its own: plane id k means nothing on
+                # another plane or in step. Only labl's per-plane map
+                # (plane_<P>/group) ties a plane id to its volume group; without
+                # it, hits keep the plane-local id, which groups the entries of
+                # one block within its plane and references nothing.
+                if supera is None:
+                    h['plane_group'] = (np.concatenate(hits_gid).astype(np.int32)
+                                        if hits_gid else np.zeros(0, np.int32))
+                    hits_gid = None
+                else:
+                    mapped = []
+                    for plane, gid in zip(h['planes'], hits_gid):
+                        v, pk = int(plane.split('_')[1]), plane.split('_', 2)[2]
+                        if v not in base:
+                            mapped.append(gid)
+                            continue
+                        m = per_vol[v].get('planes', {}).get(pk, {}).get('group')
+                        if m is None:
+                            raise ValueError(
+                                f"{plane}: hits group ids are plane-local but "
+                                "labl has no plane_<P>/group map for this plane")
+                        m = np.asarray(m, np.int64)
+                        if len(gid) and (gid.max() >= len(m) or gid.min() < 0):
+                            raise ValueError(
+                                f"{plane}: plane group id out of range of labl's "
+                                f"map ({len(m)} groups)")
+                        mapped.append(m[gid])
+                    hits_gid = mapped
+            if hits_gid is not None:
+                refs = []
+                for plane, gid in zip(h['planes'], hits_gid):
+                    v = int(plane.split('_')[1])
+                    refs.append(np.where(gid >= 0, gid + base[v], -1)
+                                if v in base else np.full(len(gid), -1))
+                h['group'] = (np.concatenate(refs).astype(np.int32) if refs
+                              else np.zeros(0, np.int32))
+                h.setdefault('_roles', {})['group'] = ('ref', 'group')
             if supera is not None:
                 # pysupera's per-hit labels where they are not the group's:
                 # off-sensor hits get none, split groups' hits their own

@@ -120,6 +120,20 @@ exactly one fragment and one instance (0 exceptions in about 80k tracks). So
 group → track → instance is a chain of functions too. 26% (wire) and 39% (pixel)
 of visible tracks have no particle row, because they are merged shower members.
 
+## Plane-local hits (`group_id_space = 'plane'`)
+
+A hits file whose root attr `group_id_space` is `'plane'` numbers each plane's groups
+0..G_plane-1 on its own: plane id k means nothing on another plane or in step, so the
+readout files carry no cross-plane or hit <-> deposit correspondence. labl then has, per
+volume and hits plane, `plane_<P>/group` (plane id -> volume group id), and pimm-data maps
+every hit through it, so `hits.group`, every label and the `group` part are what the
+volume-numbered layout gives (`tests/test_supera_labl.py::test_plane_local_layout_loads_the_same`,
+and on 1M tasks every deposit and hit, `shuffle_demo/e2e_final.py`). Without labl, hits
+carry `plane_group` (the plane-local id: which entries share a block) and no `group`
+reference; the matching regime (step.group == hits.group) needs labl. A plane-local hits
+file with a labl that lacks a plane's map raises. Example: the 5-task demo
+`doraemon_2026_1M_lartpc/shuffle_demo/final` (its README has the full layout).
+
 ## How pimm-data loads it
 
 `JAXTPCDataset` with a supera `labl` emits the event as parts linked by

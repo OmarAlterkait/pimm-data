@@ -1041,3 +1041,71 @@ def to_shared_step(step_path, hits_path, step_out, hits_out):
                         h.copy(hv[c], sv, name=c)
     return step_out, hits_out
 
+
+_PER_GROUP = ('group_ids', 'group_sizes', 'peak_charges', 'center_times',
+              'center_wires', 'center_py', 'center_pz')
+
+
+def to_plane_local(step_path, hits_path, labl_path, step_out, hits_out,
+                   labl_out, seed=0):
+    """Rewrite a shared-step step/hits/labl triple in the plane-local layout:
+    each volume's groups renumbered by a random permutation ``pi``
+    (``deposit_to_group``, labl ``group_to_track``/``group_fragment``), and on
+    each hits plane the blocks shuffled and numbered 0..G_plane-1 on their own
+    (hits attr ``group_id_space='plane'``); labl gains ``plane_<P>/group``
+    (plane id -> volume group) and its per-hit corrections follow their
+    entries. Step rows, event tables and every value stay as they were."""
+    import shutil
+    rng = np.random.default_rng(seed)
+    for a, b in ((step_path, step_out), (hits_path, hits_out),
+                 (labl_path, labl_out)):
+        shutil.copyfile(a, b)
+    with h5py.File(step_out, 'a') as s, h5py.File(hits_out, 'a') as h, \
+            h5py.File(labl_out, 'a') as lb:
+        h.attrs['group_id_space'] = 'plane'
+        for e in (k for k in h if k.startswith('entry_')):
+            for v in (k for k in h[e] if k.startswith('volume_')):
+                lv, hv, sv = lb[e][v], h[e][v], s[e][v]
+                G = len(lv['group_to_track'])
+                pi = rng.permutation(G)
+                d = sv['deposit_to_group'][:]
+                sv['deposit_to_group'][...] = np.where(
+                    d >= 0, pi[np.clip(d, 0, None)], d)
+                for c in ('group_to_track', 'group_fragment'):
+                    x = lv[c][:]
+                    y = np.empty_like(x)
+                    y[pi] = x
+                    lv[c][...] = y
+                for p in [k for k in hv if isinstance(hv[k], h5py.Group)]:
+                    o = hv[p]
+                    gid = o['group_ids'][:]
+                    sizes = o['group_sizes'][:].astype(np.int64)
+                    order = rng.permutation(len(gid))
+                    st = np.concatenate([[0], np.cumsum(sizes)[:-1]])
+                    n = sizes[order]
+                    ent = (np.repeat(st[order] - np.concatenate(
+                        [[0], np.cumsum(n)[:-1]]), n) + np.arange(n.sum()))
+                    for k in o:
+                        x = o[k][:]
+                        if k == 'group_ids':
+                            x = np.arange(len(x), dtype=x.dtype)
+                        elif k in _PER_GROUP:
+                            x = x[order]
+                        else:
+                            x = x[ent]
+                        o[k][...] = x
+                    c = lv.require_group(f'plane_{p}')
+                    if 'on_sensor' in c:
+                        bits = np.unpackbits(c['on_sensor'][:],
+                                             count=int(c['on_sensor'].attrs['n']))
+                        c['on_sensor'][...] = np.packbits(bits[ent])
+                    if 'override_index' in c:
+                        inv = np.empty(len(ent), np.int64)
+                        inv[ent] = np.arange(len(ent))
+                        ni = inv[c['override_index'][:]]
+                        srt = np.argsort(ni, kind='stable')
+                        c['override_index'][...] = ni[srt]
+                        for k in ('override_fragment', 'override_instance'):
+                            c[k][...] = c[k][:][srt]
+                    c.create_dataset('group', data=pi[gid[order]].astype(np.int32))
+    return step_out, hits_out, labl_out
